@@ -436,7 +436,6 @@ class MPIWorker(object):
 
         If you don't define workerfun(), serve() will be called automatically by
         run().
-
         """
         size = self.comm.size
         rank = self.comm.rank
@@ -497,7 +496,10 @@ class MPICollectiveWorker(object):
         
     def serve(self):
         """
-        Serve submitted calls until told to finish.
+        Serve submitted calls until told to finish. Tasks are
+        obtained via scatter and results are returned via gather, 
+        i.e. all collective workers spawned by a CollectiveBroker 
+        will participate in these collective calls.
 
         Call this function if workers need to perform initialization
         different from the controller, like this:
@@ -509,7 +511,6 @@ class MPICollectiveWorker(object):
 
         If you don't define workerfun(), serve() will be called automatically by
         run().
-
         """
 
         size = self.parent_comm.size
@@ -575,7 +576,9 @@ class MPICollectiveBroker(object):
         
     def serve(self):
         """
-        Serve submitted calls until told to finish.
+        Broker and serve submitted calls until told to finish. A task
+        is received from the controller and sent to all collective
+        workers associated with this broker via scatter.
 
         Call this function if workers need to perform initialization
         different from the controller, like this:
@@ -587,7 +590,6 @@ class MPICollectiveBroker(object):
 
         If you don't define workerfun(), serve() will be called automatically by
         run().
-
         """
         size = self.comm.size
         rank = self.comm.rank
@@ -654,14 +656,22 @@ def run(fun_name=None, module_name='__main__', verbose=False, nprocs_per_worker=
 
     Must be called on all MPI nodes.
 
-    On the controller, run() calls fun() and returns when fun() returns.
+    On the controller, run() calls fun_name() and returns when fun_name() returns.
 
     On each worker, run() calls fun() if that is defined, or calls serve()
     otherwise, and returns when fun() returns, or when fun() returns on
     the controller, or when controller calls terminate().
 
+    :arg string module_name: module where fun_name is located
     :arg bool verbose: whether processing information should be printed.
-    :arg int processes per worker: how many processes per worker
+    :arg int nprocs_per_worker: how many processes per worker
+    :arg broker_is_worker: when nprocs_per_worker, MPI Spawn will be used to create workers, 
+    and a CollectiveBroker object is used to relay tasks and results between controller and worker.
+    When broker_is_worker is true, the broker also participates in serving tasks, otherwise it only 
+    relays calls.
+    :arg args: additional args to pass to fun
+ 
+
     """
 
     if verbose:
