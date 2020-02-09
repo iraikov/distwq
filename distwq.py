@@ -31,7 +31,7 @@ available, otherwise processes calls sequentially in one process.
 #  Imports
 #
 
-import sys, importlib, time, traceback, logging
+import sys, importlib, time, traceback, logging, uuid
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -220,12 +220,13 @@ class MPIController(object):
         :return object: id of call, to be used in get_result().
         """
         if id is None:
-            id = np.random.uniform()
+            id = uuid.uuid4()
         if id in self.assigned:
             raise RuntimeError("id ", str(id), " already in queue!")
         if worker is not None and is_worker:
             raise RuntimeError(
                 "only the controller can use worker= in submit_call()")
+        logger.info("MPI controller: total_time_est is {self.total_time_est}")
         if worker is None or worker < 1 or worker >= size:
             # find worker with least estimated total time:
             worker = np.argmin(self.total_time_est)
@@ -611,6 +612,7 @@ class MPICollectiveBroker(object):
                 self.merged_comm.Disconnect()
                 break
                 
+            logger.info("MPI collective broker %d: sending task to workers..." % (rank-1))
             self.merged_comm.scatter([(name_to_call, args, kwargs, module, time_est, call_id)]*merged_size,
                                      root=merged_rank)
 
@@ -636,10 +638,12 @@ class MPICollectiveBroker(object):
             
             sub_results_and_stats = self.merged_comm.gather((result, this_stat), root=merged_rank)
             results = [result for result, stat in sub_results_and_stats if result is not None]
+            logger.info("MPI collective broker %d: gathered %s results from workers..." % (rank-1, len(results)))
             stats = [stat for result, stat in sub_results_and_stats if result is not None]
             stat_times = np.asarray([stat["this_time"] for stat in stats])
             max_time = np.argmax(stat_times)
             stat = stats[max_time]
+            logger.info("MPI collective broker %d: sending results to controller..." % (rank-1))
             self.comm.send((results, stat), dest=0)
 
     def abort(self):
@@ -724,9 +728,9 @@ def run(fun_name=None, module_name='__main__', verbose=False, nprocs_per_worker=
         
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
-    logger.info('MPI collective worker starting')
     if is_worker:
         worker_id = int(sys.argv[2])
+        logger.info('MPI collective worker %d-%d starting' % (worker_id, rank))
         worker = MPICollectiveWorker(comm, worker_id)
         fun = None
         if len(sys.argv) > 3:

@@ -20,12 +20,13 @@ def do_work(freq):
 
 
 def main(controller):
-    n = 47
+    n = 10
     for i in range(0, n):
         controller.submit_call("do_work", (i+1,), module="example_distwq")
     s = []
     for i in range(0, n):
         s.append(controller.get_next_result())
+    print("results length : %d" % len(s))
     print(s)
     controller.info()
 
