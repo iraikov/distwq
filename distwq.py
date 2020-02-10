@@ -144,7 +144,7 @@ class MPIController(object):
         """
 
     def submit_call(self, name_to_call, args=(), kwargs={},
-                    module="__main__", time_est=1, id=None, worker=None):
+                    module_name="__main__", time_est=1, id=None, worker=None):
         """
         Submit a call for parallel execution.
 
@@ -234,7 +234,7 @@ class MPIController(object):
             # send name to call, args, time_est to worker:
             logger.info(f"MPI controller : assigning call with id {id} to worker "
                         f"{worker}: {name_to_call} {args} {kwargs} ...")
-            self.comm.send((name_to_call, args, kwargs, module, time_est, id),
+            self.comm.send((name_to_call, args, kwargs, module_name, time_est, id),
                            dest=worker)
         else:
             # perform call on this rank if no workers are available:
@@ -243,9 +243,9 @@ class MPIController(object):
                         "...")
             try:
                 object_to_call = eval(name_to_call,
-                                      sys.modules[module].__dict__)
+                                      sys.modules[module_name].__dict__)
             except NameError:
-                logger.error(str(sys.modules[module].__dict__.keys()))
+                logger.error(str(sys.modules[module_name].__dict__.keys()))
                 raise
             call_time = time.time()
             self.results[id] = object_to_call(*args, **kwargs)
@@ -686,8 +686,7 @@ def run(fun_name=None, module_name='__main__', verbose=False, nprocs_per_worker=
     assert nprocs_per_worker > 0
     fun = None
     if fun_name is not None:
-        module = '__main__'
-        fun = eval(fun_name, sys.modules[module].__dict__)
+        fun = eval(fun_name, sys.modules[module_name].__dict__)
         
     if has_mpi:  # run in mpi mode
         if is_controller:  # I'm the controller

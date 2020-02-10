@@ -35,7 +35,7 @@ def do_work(i):
 def main(controller):
     n = 10
     for i in range(0, n):
-        controller.submit_call("do_work", (i+1,), module="example_nrn")
+        controller.submit_call("do_work", (i+1,), module_name="example_nrn")
     s = []
     for i in range(0, n):
         s.append(controller.get_next_result())
