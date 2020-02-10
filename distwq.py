@@ -220,7 +220,7 @@ class MPIController(object):
         :return object: id of call, to be used in get_result().
         """
         if id is None:
-            id = uuid.uuid4()
+            id = 'distwq_%s' % str(uuid.uuid4())
         if id in self.assigned:
             raise RuntimeError("id ", str(id), " already in queue!")
         if worker is not None and is_worker:
