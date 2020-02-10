@@ -686,12 +686,13 @@ def run(fun_name=None, module_name='__main__', verbose=False, nprocs_per_worker=
         logging.basicConfig(level=logging.WARN)
 
     assert nprocs_per_worker > 0
+    assert not spawned
     fun = None
     if fun_name is not None:
         if module_name not in sys.modules:
             importlib.import_module(module_name)
         fun = eval(fun_name, sys.modules[module_name].__dict__)
-        
+
     if has_mpi:  # run in mpi mode
         if is_controller:  # I'm the controller
             assert(fun is not None)
@@ -745,7 +746,6 @@ if __name__ == '__main__':
         if fun is not None:
             parent_comm = MPI.Comm.Get_parent()
             args = parent_comm.bcast(None, root=0)
-            logger.info('MPI collective worker %d-%d: args = %s' % (worker_id, rank, str(args)))
             fun(worker, *args)
         worker.serve()
     
