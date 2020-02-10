@@ -32,8 +32,12 @@ available, otherwise processes calls sequentially in one process.
 #
 
 import sys, importlib, time, traceback, logging, uuid
+from enum import Enum
 import numpy as np
 
+class CollectiveMode(Enum):
+    Gather = 1
+    
 logger = logging.getLogger(__name__)
 
 # try to get the communicator object to see whether mpi is available:
@@ -478,9 +482,10 @@ class MPIWorker(object):
         logger.info("MPI worker %d: aborting..." % rank)
         comm.Abort()
 
-class MPICollectiveWorker(object):        
+class MPICollectiveWorker(object):
 
-    def __init__(self, comm, worker_id):
+    def __init__(self, comm, worker_id, collective_mode=CollectiveMode.Gather):
+        self.collective_mode = collective_mode
         self.worker_id = worker_id
         self.comm = comm
         self.parent_comm = self.comm.Get_parent()
@@ -551,7 +556,12 @@ class MPICollectiveWorker(object):
                                "time_over_est": this_time / time_est,
                                "n_processed": self.n_processed[rank],
                                "total_time": time.time() - start_time})
-            self.merged_comm.gather((result, self.stats[-1]), root=0)
+            self.merged_comm.gather(self.stats[-1], root=0)
+            if self.collective_mode == CollectiveMode.Gather:
+                self.merged_comm.gather(result, root=0)
+            else:
+                raise RuntimeError("MPICollectiveWorker: unknown collective mode")
+                
 
     def abort(self):
         rank = self.comm.rank
@@ -562,9 +572,10 @@ class MPICollectiveWorker(object):
         
 class MPICollectiveBroker(object):        
 
-    def __init__(self, comm, sub_comm, is_worker=False):
+    def __init__(self, comm, sub_comm, is_worker=False, collective_mode=CollectiveMode.Gather):
         logger.info('MPI collective broker %d starting' % (rank-1))
         assert(not spawned)
+        self.collective_mode=collective_mode
         self.comm = comm
         self.sub_comm = sub_comm
         self.merged_comm = sub_comm.Merge(False)
@@ -637,11 +648,15 @@ class MPICollectiveBroker(object):
                 
             if this_stat is not None:
                 self.stats.append(this_stat)
-            
-            sub_results_and_stats = self.merged_comm.gather((result, this_stat), root=merged_rank)
-            results = [result for result, stat in sub_results_and_stats if result is not None]
+
+            sub_stats = self.merged_comm.gather(this_stat, root=merged_rank)
+            stats = [stat for stat in sub_stats if stat is not None]
+            if self.collective_mode == CollectiveMode.Gather:
+                sub_results = self.merged_comm.gather(result, root=merged_rank)
+                results = [result for result in sub_results if result is not None]
+            else:
+                raise RuntimeError('MPICollectiveBroker: unknown collective mode')
             logger.info("MPI collective broker %d: gathered %s results from workers..." % (rank-1, len(results)))
-            stats = [stat for result, stat in sub_results_and_stats if result is not None]
             stat_times = np.asarray([stat["this_time"] for stat in stats])
             max_time = np.argmax(stat_times)
             stat = stats[max_time]
