@@ -60,12 +60,13 @@ if has_mpi:
     sys_excepthook = sys.excepthook
     sys.excepthook = mpi_excepthook
 
+my_args = sys.argv[sys.argv.index('-')+1:] if '-' in sys.argv else None
 
 # initialize:
 workers_available = True
 spawned = False
 if has_mpi:
-    spawned = (__name__ == '__main__')
+    spawned = (my_args[0] == 'distwq:spawned') if my_args is not None else False
     size = comm.size
     rank = comm.rank
     is_controller = (not spawned) and (rank == 0)
@@ -226,7 +227,6 @@ class MPIController(object):
         if worker is not None and is_worker:
             raise RuntimeError(
                 "only the controller can use worker= in submit_call()")
-        logger.info("MPI controller: total_time_est is {self.total_time_est}")
         if worker is None or worker < 1 or worker >= size:
             # find worker with least estimated total time:
             worker = np.argmin(self.total_time_est)
@@ -563,6 +563,8 @@ class MPICollectiveWorker(object):
 class MPICollectiveBroker(object):        
 
     def __init__(self, comm, sub_comm, is_worker=False):
+        logger.info('MPI collective broker %d starting' % (rank-1))
+        assert(not spawned)
         self.comm = comm
         self.sub_comm = sub_comm
         self.merged_comm = sub_comm.Merge(False)
@@ -686,6 +688,8 @@ def run(fun_name=None, module_name='__main__', verbose=False, nprocs_per_worker=
     assert nprocs_per_worker > 0
     fun = None
     if fun_name is not None:
+        if module_name not in sys.modules:
+            importlib.import_module(module_name)
         fun = eval(fun_name, sys.modules[module_name].__dict__)
         
     if has_mpi:  # run in mpi mode
@@ -699,24 +703,23 @@ def run(fun_name=None, module_name='__main__', verbose=False, nprocs_per_worker=
             controller.terminate()
         else:  # I'm a worker or a broker
             if nprocs_per_worker > 1:
-                arglist = ['-m', 'distwq', '-', '%d' % (rank-1)]
+                arglist = ['-m', 'distwq', '-', 'distwq:spawned', '%d' % (rank-1)]
                 if fun is not None:
                     arglist += [str(fun_name), str(module_name)]
-                sub_comm = MPI.COMM_SELF.Spawn(sys.executable,
-                                                args=arglist,
+                sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
                                                 maxprocs=nprocs_per_worker-1
                                                    if broker_is_worker else nprocs_per_worker)
-                broker=MPICollectiveBroker(comm, sub_comm, is_worker=broker_is_worker)
                 if fun is not None:
+                    sub_comm.bcast(args, root=MPI.ROOT)
+                broker=MPICollectiveBroker(comm, sub_comm, is_worker=broker_is_worker)
+                if broker_is_worker and (fun is not None):
                     fun(broker, *args)
-                else:
-                    broker.serve()
+                broker.serve()
             else:
                 worker = MPIWorker(comm)
                 if fun is not None:
                     fun(worker, *args)
-                else:
-                    worker.serve()
+                worker.serve()
     else:  # run as single processor
         assert(fun is not None)
         logger.info("MPI controller : not available, running as a single process.")
@@ -728,16 +731,21 @@ def run(fun_name=None, module_name='__main__', verbose=False, nprocs_per_worker=
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     if is_worker:
-        worker_id = int(sys.argv[2])
+        worker_id = int(my_args[1])
         logger.info('MPI collective worker %d-%d starting' % (worker_id, rank))
+        logger.info('MPI collective worker %d-%d args: %s' % (worker_id, rank, str(my_args)))
         worker = MPICollectiveWorker(comm, worker_id)
         fun = None
-        if len(sys.argv) > 3:
-            fun_name = sys.argv[4]
-            module = sys.argv[5]
+        if len(my_args) > 2:
+            fun_name = my_args[2]
+            module = my_args[3]
+            if module not in sys.modules:
+                importlib.import_module(module)
             fun = eval(fun_name, sys.modules[module].__dict__)
         if fun is not None:
-            fun(worker, sys.argv[6:])
-        else:
-            worker.serve()
+            parent_comm = MPI.Comm.Get_parent()
+            args = parent_comm.bcast(None, root=0)
+            logger.info('MPI collective worker %d-%d: args = %s' % (worker_id, rank, str(args)))
+            fun(worker, *args)
+        worker.serve()
     
