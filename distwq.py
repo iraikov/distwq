@@ -246,6 +246,8 @@ class MPIController(object):
             logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} "
                         "...")
             try:
+                if module_name not in sys.modules:
+                    importlib.import_module(module_name)
                 object_to_call = eval(name_to_call,
                                       sys.modules[module_name].__dict__)
             except NameError:
@@ -671,7 +673,7 @@ class MPICollectiveBroker(object):
 
 
 
-def run(fun_name=None, module_name='__main__', verbose=False, nprocs_per_worker=1, broker_is_worker=False, args=()):
+def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=False, nprocs_per_worker=1, broker_is_worker=False, args=()):
     """
     Run in controller/worker mode until fun(controller/worker) finishes.
 
@@ -685,8 +687,9 @@ def run(fun_name=None, module_name='__main__', verbose=False, nprocs_per_worker=
 
     :arg string module_name: module where fun_name is located
     :arg bool verbose: whether processing information should be printed.
+    :arg bool spawn_workers: whether to spawn separate worker processes via MPI_Spawn
     :arg int nprocs_per_worker: how many processes per worker
-    :arg broker_is_worker: when nprocs_per_worker, MPI Spawn will be used to create workers, 
+    :arg broker_is_worker: when spawn_worker is True or nprocs_per_worker > 1, MPI_Spawn will be used to create workers, 
     and a CollectiveBroker object is used to relay tasks and results between controller and worker.
     When broker_is_worker is true, the broker also participates in serving tasks, otherwise it only 
     relays calls.
@@ -718,12 +721,16 @@ def run(fun_name=None, module_name='__main__', verbose=False, nprocs_per_worker=
                 controller.abort()
             controller.terminate()
         else:  # I'm a worker or a broker
-            if nprocs_per_worker > 1:
+            if (n_workers > 0) and (nprocs_per_worker > 1):
+                spawn_workers = True
+            if spawn_workers and (nprocs_per_worker==1) and broker_is_worker:
+                raise RuntimeException("distwq.run: cannot spawn workers when nprocs_per_worker=1 and broker_is_worker is set to True")
+            if spawn_workers:
                 arglist = ['-m', 'distwq', '-', 'distwq:spawned', '%d' % (rank-1)]
                 if fun is not None:
                     arglist += [str(fun_name), str(module_name)]
                 sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
-                                                maxprocs=nprocs_per_worker-1
+                                                maxprocs=nprocs_per_worker-1 
                                                    if broker_is_worker else nprocs_per_worker)
                 if fun is not None:
                     sub_comm.bcast(args, root=MPI.ROOT)
