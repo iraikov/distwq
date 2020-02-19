@@ -95,6 +95,8 @@ class MPIController(object):
 
         self.comm = comm
         self.workers_available = True if size > 1 else False
+        
+        self.count = 0
 
         self.total_time_est = np.zeros(size)
         """
@@ -225,7 +227,8 @@ class MPIController(object):
         :return object: id of call, to be used in get_result().
         """
         if id is None:
-            id = 'distwq_%s' % str(uuid.uuid4())
+            id = self.count
+            self.count += 1
         if id in self.assigned:
             raise RuntimeError("id ", str(id), " already in queue!")
         if worker is not None and is_worker:
@@ -297,8 +300,9 @@ class MPIController(object):
                                    + str(worker_queue[source][0]) + ")")
             logger.info(f"MPI controller : retrieving result for call with id {id} "
                         f"from worker {source} ...")
-            data = self.comm.recv(source=source)
-            
+            data = self.comm.recv(source=source, tag=id)
+            logger.info(f"MPI controller : received result for call with id {id} "
+                        f"from worker {source}.")
             (result, this_stats) = data
             self.stats.append(this_stats)
             self.n_processed[source] = this_stats["n_processed"]
@@ -476,7 +480,7 @@ class MPIWorker(object):
                                "time_over_est": this_time / time_est,
                                "n_processed": self.n_processed[rank],
                                "total_time": time.time() - start_time})
-            comm.send((result, self.stats[-1]), dest=0)
+            comm.send((result, self.stats[-1]), dest=0, tag=call_id)
 
     def abort(self):
         rank = self.comm.rank
@@ -558,9 +562,8 @@ class MPICollectiveWorker(object):
                                "time_over_est": this_time / time_est,
                                "n_processed": self.n_processed[rank],
                                "total_time": time.time() - start_time})
-            self.merged_comm.gather(self.stats[-1], root=0)
             if self.collective_mode == CollectiveMode.Gather:
-                self.merged_comm.gather(result, root=0)
+                self.merged_comm.gather((result, self.stats[-1]), root=0)
             else:
                 raise RuntimeError("MPICollectiveWorker: unknown collective mode")
                 
@@ -616,6 +619,7 @@ class MPICollectiveBroker(object):
             
         # wait for orders:
         while True:
+            logger.info("MPI collective broker %d: getting next task from controller..." % (rank-1))
             # get next task from controller queue:
             (name_to_call, args, kwargs, module, time_est, call_id) = \
                 self.comm.recv(source=0)
@@ -627,9 +631,10 @@ class MPICollectiveBroker(object):
                 self.merged_comm.Disconnect()
                 break
                 
-            logger.info("MPI collective broker %d: sending task to workers..." % (rank-1))
+            logger.info("MPI collective broker %d: sending task %s to workers..." % (rank-1, str(call_id)))
             self.merged_comm.scatter([(name_to_call, args, kwargs, module, time_est, call_id)]*merged_size,
                                      root=merged_rank)
+            logger.info("MPI collective broker %d: sending task complete." % (rank-1))
 
             self.total_time_est[rank] += time_est
             if self.is_worker:
@@ -651,11 +656,11 @@ class MPICollectiveBroker(object):
             if this_stat is not None:
                 self.stats.append(this_stat)
 
-            sub_stats = self.merged_comm.gather(this_stat, root=merged_rank)
-            stats = [stat for stat in sub_stats if stat is not None]
+            logger.info("MPI collective broker %d: gathering data from workers..." % (rank-1))
             if self.collective_mode == CollectiveMode.Gather:
-                sub_results = self.merged_comm.gather(result, root=merged_rank)
-                results = [result for result in sub_results if result is not None]
+                sub_data = self.merged_comm.gather((result, this_stat), root=merged_rank)
+                results = [result for result, stat in sub_data if result is not None]
+                stats = [stat for result, stat in sub_data if result is not None]
             else:
                 raise RuntimeError('MPICollectiveBroker: unknown collective mode')
             logger.info("MPI collective broker %d: gathered %s results from workers..." % (rank-1, len(results)))
@@ -663,7 +668,7 @@ class MPICollectiveBroker(object):
             max_time = np.argmax(stat_times)
             stat = stats[max_time]
             logger.info("MPI collective broker %d: sending results to controller..." % (rank-1))
-            self.comm.send((results, stat), dest=0)
+            self.comm.send((results, stat), dest=0, tag=call_id)
 
     def abort(self):
         rank = self.comm.rank
