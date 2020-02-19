@@ -66,6 +66,10 @@ if has_mpi:
 
 my_args = sys.argv[sys.argv.index('-')+1:] if '-' in sys.argv else None
 
+# message types
+tag_ctrl_to_worker = 1
+tag_worker_to_ctrl = 2
+
 # initialize:
 workers_available = True
 spawned = False
@@ -242,7 +246,7 @@ class MPIController(object):
             logger.info(f"MPI controller : assigning call with id {id} to worker "
                         f"{worker}: {name_to_call} {args} {kwargs} ...")
             self.comm.send((name_to_call, args, kwargs, module_name, time_est, id),
-                           dest=worker)
+                           dest=worker, tag=tag_ctrl_to_worker)
         else:
             # perform call on this rank if no workers are available:
             worker = 0
@@ -300,7 +304,7 @@ class MPIController(object):
                                    + str(worker_queue[source][0]) + ")")
             logger.info(f"MPI controller : retrieving result for call with id {id} "
                         f"from worker {source} ...")
-            data = self.comm.recv(source=source, tag=id)
+            data = self.comm.recv(source=source, tag=tag_worker_to_ctrl)
             logger.info(f"MPI controller : received result for call with id {id} "
                         f"from worker {source}.")
             (result, this_stats) = data
@@ -406,7 +410,7 @@ class MPIController(object):
             for worker in range(1, size):
                 logger.info(f"MPI controller : telling worker {worker} "
                             "to terminate...")
-                comm.send(("terminate", (), {}, "", 0, 0), dest=worker)
+                comm.send(("terminate", (), {}, "", 0, 0), dest=worker, tag=tag_ctrl_to_worker)
             self.workers_available = False
 
     def abort(self):
@@ -457,7 +461,7 @@ class MPIWorker(object):
         while True:
             # get next task from queue:
             (name_to_call, args, kwargs, module, time_est, call_id) = \
-                self.comm.recv(source=0)
+                self.comm.recv(source=0, tag=tag_ctrl_to_worker)
             # TODO: add timeout and check whether controller lives!
             if name_to_call == "terminate":
                 logger.info("MPI worker %d: terminating..." % rank)
@@ -480,7 +484,7 @@ class MPIWorker(object):
                                "time_over_est": this_time / time_est,
                                "n_processed": self.n_processed[rank],
                                "total_time": time.time() - start_time})
-            comm.send((result, self.stats[-1]), dest=0, tag=call_id)
+            comm.send((result, self.stats[-1]), dest=0, tag=tag_worker_to_ctrl)
 
     def abort(self):
         rank = self.comm.rank
@@ -622,7 +626,7 @@ class MPICollectiveBroker(object):
             logger.info("MPI collective broker %d: getting next task from controller..." % (rank-1))
             # get next task from controller queue:
             (name_to_call, args, kwargs, module, time_est, call_id) = \
-                self.comm.recv(source=0)
+                self.comm.recv(source=0, tag=tag_ctrl_to_worker)
             # TODO: add timeout and check whether controller lives!
             if name_to_call == "terminate":
                 logger.info("MPI worker broker %d: terminating..." % (rank-1))
@@ -668,7 +672,7 @@ class MPICollectiveBroker(object):
             max_time = np.argmax(stat_times)
             stat = stats[max_time]
             logger.info("MPI collective broker %d: sending results to controller..." % (rank-1))
-            self.comm.send((results, stat), dest=0, tag=call_id)
+            self.comm.send((results, stat), dest=0, tag=tag_worker_to_ctrl)
 
     def abort(self):
         rank = self.comm.rank
