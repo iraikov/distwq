@@ -32,11 +32,18 @@ available, otherwise processes calls sequentially in one process.
 #
 
 import sys, importlib, time, traceback, logging, uuid
-from enum import Enum
+from enum import Enum, IntEnum
 import numpy as np
 
-class CollectiveMode(Enum):
+class CollectiveMode(IntEnum):
     Gather = 1
+
+class MessageTag(IntEnum):
+    READY = 0
+    DONE = 1
+    TASK = 2
+    EXIT = 3
+
     
 logger = logging.getLogger(__name__)
 
@@ -102,7 +109,7 @@ class MPIController(object):
         
         self.count = 0
 
-        self.total_time_est = np.zeros(size)
+        self.total_time_est = np.ones(size)
         """
         (numpy array of ints)
         total_time_est[i] is the current estimate of the total time
@@ -110,7 +117,9 @@ class MPIController(object):
         On worker i, only total_time_est[i] is available.
         """
         self.total_time_est[0] = np.inf
-        self.queue = []
+        self.result_queue = []
+        self.task_queue = []
+        self.ready_workers = []
         """(list) ids of submitted calls"""
         self.assigned = {}
         """
@@ -154,8 +163,36 @@ class MPIController(object):
         - "total_time": total wall time until this call was finished
         """
 
+    def recv(self):
+        """
+        Process incoming messages.
+        """
+        if self.comm.Iprobe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG):
+
+            status = MPI.Status()
+            data = self.comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
+            worker = status.Get_source()
+            tag = status.Get_tag()
+            if tag == MessageTag.READY:
+                self.ready_workers.append(worker)
+            
+            elif tag == MessageTag.DONE:
+                task_id, results, stats = data
+                self.results[task_id] = results
+                self.stats.append(stats)
+                self.n_processed[worker] = stats["n_processed"]
+                self.total_time[worker] = stats["total_time"]
+                self.task_queue.remove(task_id)
+                self.result_queue.append(task_id)
+                self.worker_queue[worker].remove(task_id)
+                self.assigned.pop(task_id)
+            else:
+                raise RuntimeError(f"MPI controller : invalid message tag {tag}")
+        else:
+            time.sleep(1)
+        
     def submit_call(self, name_to_call, args=(), kwargs={},
-                    module_name="__main__", time_est=1, id=None, worker=None):
+                    module_name="__main__", time_est=1, task_id=None):
         """
         Submit a call for parallel execution.
 
@@ -230,23 +267,26 @@ class MPIController(object):
             estimate. Default: None
         :return object: id of call, to be used in get_result().
         """
-        if id is None:
-            id = self.count
+        if task_id is None:
+            task_id = self.count
             self.count += 1
-        if id in self.assigned:
-            raise RuntimeError("id ", str(id), " already in queue!")
-        if worker is not None and is_worker:
-            raise RuntimeError(
-                "only the controller can use worker= in submit_call()")
-        if worker is None or worker < 1 or worker >= size:
-            # find worker with least estimated total time:
-            worker = np.argmin(self.total_time_est)
+        if task_id in self.assigned:
+            raise RuntimeError("id ", str(task_id), " already in queue!")
         if self.workers_available:
-            # send name to call, args, time_est to worker:
-            logger.info(f"MPI controller : assigning call with id {id} to worker "
-                        f"{worker}: {name_to_call} {args} {kwargs} ...")
-            self.comm.send((name_to_call, args, kwargs, module_name, time_est, id),
-                           dest=worker, tag=tag_ctrl_to_worker)
+            while True:
+                self.recv()
+                if len(self.ready_workers) > 0:
+                    ready_total_time_est = np.asarray([self.total_time_est[worker] for worker in self.ready_workers])
+                    worker = self.ready_workers[np.argmin(ready_total_time_est)]
+                    # send name to call, args, time_est to worker:
+                    logger.info(f"MPI controller : assigning call with id {task_id} to worker "
+                                    f"{worker}: {name_to_call} {args} {kwargs} ...")
+                    req = self.comm.isend((name_to_call, args, kwargs, module_name, time_est, task_id),
+                                          dest=worker, tag=MessageTag.TASK)
+                    req.wait()
+                    self.ready_workers.remove(worker)
+                    break
+
         else:
             # perform call on this rank if no workers are available:
             worker = 0
@@ -261,23 +301,23 @@ class MPIController(object):
                 logger.error(str(sys.modules[module_name].__dict__.keys()))
                 raise
             call_time = time.time()
-            self.results[id] = object_to_call(*args, **kwargs)
+            self.results[task_id] = object_to_call(*args, **kwargs)
             this_time = time.time() - call_time
             self.n_processed[0] += 1
             self.total_time[0] = time.time() - start_time
-            self.stats.append({"id": id, "rank": 0,
+            self.stats.append({"id":task_id, "rank": 0,
                                "this_time": this_time,
                                "time_over_est": this_time / time_est,
                                "n_processed": self.n_processed[0],
                                "total_time": self.total_time[0]})
 
         self.total_time_est[worker] += time_est
-        self.queue.append(id)
-        self.worker_queue[worker].append(id)
-        self.assigned[id] = worker
-        return id
+        self.task_queue.append(task_id)
+        self.worker_queue[worker].append(task_id)
+        self.assigned[task_id] = worker
+        return task_id
 
-    def get_result(self, id):
+    def get_result(self, task_id):
         """
         Return result of earlier submitted call.
 
@@ -296,46 +336,49 @@ class MPIController(object):
         :rtype:  object
         :return: return value of call.
         """
-        source = self.assigned[id]
+        if task_id in self.results:
+            return self.results[task_id]
+        source = self.assigned[task_id]
         if self.workers_available:
-            if self.worker_queue[source][0] != id:
-                raise RuntimeError("get_result(" + str(id)
+            if self.worker_queue[source][0] != task_id:
+                raise RuntimeError("get_result(" + str(task_id)
                                    + ") called before get_result("
                                    + str(worker_queue[source][0]) + ")")
-            logger.info(f"MPI controller : retrieving result for call with id {id} "
+            logger.info(f"MPI controller : retrieving result for call with id {task_id} "
                         f"from worker {source} ...")
-            data = self.comm.recv(source=source, tag=tag_worker_to_ctrl)
-            logger.info(f"MPI controller : received result for call with id {id} "
+            
+            while not (task_id in self.results):
+                self.recv()
+
+            logger.info(f"MPI controller : received result for call with id {task_id} "
                         f"from worker {source}.")
-            (result, this_stats) = data
-            self.stats.append(this_stats)
-            self.n_processed[source] = this_stats["n_processed"]
-            self.total_time[source] = this_stats["total_time"]
+            
         else:
-            logger.info(f"MPI controller : returning result for call with id {id} "
+            logger.info(f"MPI controller : returning result for call with id {task_id} "
                         "...")
-            result = self.results[id]
-        self.queue.remove(id)
-        self.worker_queue[source].remove(id)
-        self.assigned.pop(id)
-        return result
+        result = self.results[task_id]
+        self.result_queue.remove(task_id)
+        return task_id, result
 
     def get_next_result(self):
         """
         Return result of next earlier submitted call whose result has not yet
-        been got.
+        been obtained.
 
         Can only be called by the controller.
 
         If the call is not yet finished, waits for it to finish.
 
         :rtype:  object
-        :return: return value of call, or None of there are no more calls in
+        :return: id, return value of call, or None of there are no more calls in
                  the queue.
         """
-        if len(self.queue) > 0:
-            id = self.queue[0]
-            return self.get_result(id)
+        if len(self.result_queue) > 0:
+            task_id = self.result_queue.pop(0)
+            return task_id, self.results[task_id]
+        elif len(self.task_queue) > 0:
+            task_id = self.task_queue[0]
+            return self.get_result(task_id)
         else:
             return None
 
@@ -357,7 +400,7 @@ class MPIController(object):
                   "     results collected:         "
                   f"{self.n_processed[1:].sum()}\n"
                   "     results not yet collected: "
-                  f"{len(self.queue)}\n"
+                  f"{len(self.task_queue)}\n"
                   "     total reported time:       "
                   f"{call_times.sum()}\n"
                   "     mean time per call:        "
@@ -389,7 +432,7 @@ class MPIController(object):
                   "     results collected:         "
                   f"{self.n_processed[0]}\n"
                   "     results not yet collected: "
-                  f"{len(self.queue)}\n"
+                  f"{len(self.task_queue)}\n"
                   "     total reported time:       "
                   f"{call_times.sum()}\n"
                   "     mean time per call:        "
@@ -399,19 +442,21 @@ class MPIController(object):
                   "     coeff. of var. of actual over estd. time per call: "
                   f"{call_quotients.std()/call_quotients.mean()}\n")
 
-    def terminate(self):
+    def exit(self):
         """
-        Tell all workers to terminate.
+        Tell all workers to exit.
 
         Can only be called by the controller.
         """
         if self.workers_available:
-            # tell workers to terminate:
+            while self.get_next_result() is not None:
+                pass
+            # tell workers to exit:
             for worker in range(1, size):
                 logger.info(f"MPI controller : telling worker {worker} "
-                            "to terminate...")
-                comm.send(("terminate", (), {}, "", 0, 0), dest=worker, tag=tag_ctrl_to_worker)
-            self.workers_available = False
+                            "to exit...")
+                req = comm.isend(None, dest=worker, tag=MessageTag.EXIT)
+                req.wait()
 
     def abort(self):
         """
@@ -458,34 +503,51 @@ class MPIWorker(object):
         logger.info("MPI worker %d: waiting for calls." % rank)
             
         # wait for orders:
+        ready = True
+        status = MPI.Status()
         while True:
+            # signal the controller this worker is ready
+            if ready:
+                req = self.comm.isend(None, dest=0, tag=MessageTag.READY)
+                req.wait()
+            
             # get next task from queue:
-            (name_to_call, args, kwargs, module, time_est, call_id) = \
-                self.comm.recv(source=0, tag=tag_ctrl_to_worker)
-            # TODO: add timeout and check whether controller lives!
-            if name_to_call == "terminate":
-                logger.info("MPI worker %d: terminating..." % rank)
-                break
-            try:
-                if module not in sys.modules:
-                    importlib.import_module(module)
-                object_to_call = eval(name_to_call,
-                                      sys.modules[module].__dict__)
-            except NameError:
-                logger.error(str(sys.modules[module].__dict__.keys()))
-                raise
-            self.total_time_est[rank] += time_est
-            call_time = time.time()
-            result = object_to_call(*args, **kwargs)
-            this_time = time.time() - call_time
-            self.n_processed[rank] += 1
-            self.stats.append({"id": call_id, "rank": rank,
-                               "this_time": this_time,
-                               "time_over_est": this_time / time_est,
-                               "n_processed": self.n_processed[rank],
-                               "total_time": time.time() - start_time})
-            comm.send((result, self.stats[-1]), dest=0, tag=tag_worker_to_ctrl)
-
+            if self.comm.Iprobe(source=0, tag=MPI.ANY_TAG):
+                data = self.comm.recv(source=0, tag=MPI.ANY_TAG, status=status)
+                tag = status.Get_tag()
+                
+                # TODO: add timeout and check whether controller lives!
+                if tag == MessageTag.EXIT:
+                    logger.info("MPI worker %d: exiting..." % rank)
+                    break
+                elif tag == MessageTag.TASK:
+                    try:
+                        (name_to_call, args, kwargs, module, time_est, task_id) = data
+                        if module not in sys.modules:
+                            importlib.import_module(module)
+                            object_to_call = eval(name_to_call,
+                                                  sys.modules[module].__dict__)
+                    except NameError:
+                        logger.error(str(sys.modules[module].__dict__.keys()))
+                        raise
+                else:
+                    raise RuntimeError('MPI worker %d: unknown message tag' % rank)
+                self.total_time_est[rank] += time_est
+                call_time = time.time()
+                result = object_to_call(*args, **kwargs)
+                this_time = time.time() - call_time
+                self.n_processed[rank] += 1
+                self.stats.append({"id": task_id, "rank": rank,
+                                   "this_time": this_time,
+                                   "time_over_est": this_time / time_est,
+                                   "n_processed": self.n_processed[rank],
+                                   "total_time": time.time() - start_time})
+                req = comm.isend((task_id, result, self.stats[-1]), dest=0, tag=MessageTag.DONE)
+                req.wait()
+                ready = True
+            else:
+                ready = False
+                time.sleep(1)
     def abort(self):
         rank = self.comm.rank
         traceback.print_exc()
@@ -539,13 +601,16 @@ class MPICollectiveWorker(object):
         while True:
             logger.info("MPI collective worker %d-%d: getting next task from queue..." % (self.worker_id, rank))
             # get next task from queue:
-            (name_to_call, args, kwargs, module, time_est, call_id) = \
+            req = self.merged_comm.Ibarrier()
+            (name_to_call, args, kwargs, module, time_est, task_id) = \
                 self.merged_comm.scatter(None, root=0)
+            req.wait()
+            logger.info("MPI collective worker %d-%d: received next task from queue." % (self.worker_id, rank))
             # TODO: add timeout and check whether controller lives!
-            if name_to_call == "terminate":
-                logger.info("MPI collective worker %d-%d: terminating..." % (self.worker_id, rank))
-                self.parent_comm.Disconnect()
+            if name_to_call == "exit":
+                logger.info("MPI collective worker %d-%d: exiting..." % (self.worker_id, rank))
                 self.merged_comm.Disconnect()
+                self.parent_comm.Disconnect()
                 break
             try:
                 if module not in sys.modules:
@@ -560,14 +625,16 @@ class MPICollectiveWorker(object):
             result = object_to_call(*args, **kwargs)
             this_time = time.time() - call_time
             self.n_processed[rank] += 1
-            self.stats.append({"id": call_id,
+            self.stats.append({"id": task_id,
                                "rank": merged_rank,
                                "this_time": this_time,
                                "time_over_est": this_time / time_est,
                                "n_processed": self.n_processed[rank],
                                "total_time": time.time() - start_time})
             if self.collective_mode == CollectiveMode.Gather:
+                req = self.merged_comm.Ibarrier()
                 self.merged_comm.gather((result, self.stats[-1]), root=0)
+                req.wait()
             else:
                 raise RuntimeError("MPICollectiveWorker: unknown collective mode")
                 
@@ -623,21 +690,37 @@ class MPICollectiveBroker(object):
             
         # wait for orders:
         while True:
+            # signal the controller this worker is ready
+            req = self.comm.isend(None, dest=0, tag=MessageTag.READY)
+            req.wait()
             logger.info("MPI collective broker %d: getting next task from controller..." % (rank-1))
-            # get next task from controller queue:
-            (name_to_call, args, kwargs, module, time_est, call_id) = \
-                self.comm.recv(source=0, tag=tag_ctrl_to_worker)
-            # TODO: add timeout and check whether controller lives!
-            if name_to_call == "terminate":
-                logger.info("MPI worker broker %d: terminating..." % (rank-1))
-                self.merged_comm.scatter([("terminate", (), {}, "", 0, 0)]*merged_size, root=merged_rank)
-                self.sub_comm.Disconnect()
+
+            while True:
+                msg = self.recv()
+                if msg is not None:
+                    tag, data = msg
+                    break
+
+            logger.info("MPI collective broker %d: received message from controller..." % (rank-1))
+
+            if tag == MessageTag.EXIT:
+                logger.info("MPI worker broker %d: exiting..." % (rank-1))
+                req = self.merged_comm.Ibarrier()
+                self.merged_comm.scatter([("exit", (), {}, "", 0, 0)]*merged_size, root=0)
+                req.wait()
                 self.merged_comm.Disconnect()
+                self.sub_comm.Disconnect()
                 break
-                
-            logger.info("MPI collective broker %d: sending task %s to workers..." % (rank-1, str(call_id)))
-            self.merged_comm.scatter([(name_to_call, args, kwargs, module, time_est, call_id)]*merged_size,
+            elif tag == MessageTag.TASK:
+                (name_to_call, args, kwargs, module, time_est, task_id) = data
+            else:
+                raise RuntimeError('MPI collective broker: unknown message tag')
+                 
+            logger.info("MPI collective broker %d: sending task %s to workers..." % (rank-1, str(task_id)))
+            req = self.merged_comm.Ibarrier()
+            self.merged_comm.scatter([(name_to_call, args, kwargs, module, time_est, task_id)]*merged_size,
                                      root=merged_rank)
+            req.wait()
             logger.info("MPI collective broker %d: sending task complete." % (rank-1))
 
             self.total_time_est[rank] += time_est
@@ -646,7 +729,7 @@ class MPICollectiveBroker(object):
                 result = object_to_call(*args, **kwargs)
                 this_time = time.time() - call_time
                 self.n_processed[rank] += 1
-                this_stat = {"id": call_id,
+                this_stat = {"id": task_id,
                              "rank": merged_rank,
                              "this_time": this_time,
                              "time_over_est": this_time / time_est,
@@ -662,7 +745,9 @@ class MPICollectiveBroker(object):
 
             logger.info("MPI collective broker %d: gathering data from workers..." % (rank-1))
             if self.collective_mode == CollectiveMode.Gather:
+                req = self.merged_comm.Ibarrier()
                 sub_data = self.merged_comm.gather((result, this_stat), root=merged_rank)
+                req.wait()
                 results = [result for result, stat in sub_data if result is not None]
                 stats = [stat for result, stat in sub_data if result is not None]
             else:
@@ -672,7 +757,21 @@ class MPICollectiveBroker(object):
             max_time = np.argmax(stat_times)
             stat = stats[max_time]
             logger.info("MPI collective broker %d: sending results to controller..." % (rank-1))
-            self.comm.send((results, stat), dest=0, tag=tag_worker_to_ctrl)
+            req = self.comm.isend((task_id, results, stat), dest=0, tag=MessageTag.DONE)
+            req.wait()
+
+    def recv(self):
+        status = MPI.Status()
+        if self.comm.Iprobe(source=0, tag=MPI.ANY_TAG):
+            # get next task from controller queue:
+            data = self.comm.recv(source=0, tag=MPI.ANY_TAG, status=status)
+            tag = status.Get_tag()
+            return tag, data
+        else:
+            time.sleep(1)
+            return None
+            
+
 
     def abort(self):
         rank = self.comm.rank
@@ -692,7 +791,7 @@ def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=Fals
 
     On each worker, run() calls fun() if that is defined, or calls serve()
     otherwise, and returns when fun() returns, or when fun() returns on
-    the controller, or when controller calls terminate().
+    the controller, or when controller calls exit().
 
     :arg string module_name: module where fun_name is located
     :arg bool verbose: whether processing information should be printed.
@@ -724,11 +823,11 @@ def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=Fals
         if is_controller:  # I'm the controller
             assert(fun is not None)
             controller = MPIController(comm)
-            try:  # put everything in a try block to be able to terminate!
+            try:  # put everything in a try block to be able to exit!
                 fun(controller, *args)
             except ValueError:
                 controller.abort()
-            controller.terminate()
+            controller.exit()
         else:  # I'm a worker or a broker
             if (n_workers > 0) and (nprocs_per_worker > 1):
                 spawn_workers = True
