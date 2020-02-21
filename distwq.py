@@ -517,6 +517,7 @@ class MPIWorker(object):
                 tag = status.Get_tag()
                 
                 # TODO: add timeout and check whether controller lives!
+                object_to_call = None
                 if tag == MessageTag.EXIT:
                     logger.info("MPI worker %d: exiting..." % rank)
                     break
@@ -525,8 +526,8 @@ class MPIWorker(object):
                         (name_to_call, args, kwargs, module, time_est, task_id) = data
                         if module not in sys.modules:
                             importlib.import_module(module)
-                            object_to_call = eval(name_to_call,
-                                                  sys.modules[module].__dict__)
+                        object_to_call = eval(name_to_call,
+                                              sys.modules[module].__dict__)
                     except NameError:
                         logger.error(str(sys.modules[module].__dict__.keys()))
                         raise
