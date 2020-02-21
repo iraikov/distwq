@@ -834,7 +834,7 @@ def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=Fals
             if spawn_workers and (nprocs_per_worker==1) and broker_is_worker:
                 raise RuntimeException("distwq.run: cannot spawn workers when nprocs_per_worker=1 and broker_is_worker is set to True")
             if spawn_workers:
-                arglist = ['-m', 'distwq', '-', 'distwq:spawned', '%d' % (rank-1)]
+                arglist = ['-m', 'distwq', '-', 'distwq:spawned', '%d' % (rank-1), '%d' % (1 if verbose else 0)]
                 if fun is not None:
                     arglist += [str(fun_name), str(module_name)]
                 sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
@@ -860,16 +860,21 @@ def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=Fals
 
         
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
     if is_worker:
         worker_id = int(my_args[1])
+        verbose_flag = int(my_args[2])
+        verbose = True if verbose_flag == 1 else False
+        if verbose:
+            logging.basicConfig(level=logging.INFO)
+        else:
+            logging.basicConfig(level=logging.WARN)
         logger.info('MPI collective worker %d-%d starting' % (worker_id, rank))
         logger.info('MPI collective worker %d-%d args: %s' % (worker_id, rank, str(my_args)))
         worker = MPICollectiveWorker(comm, worker_id)
         fun = None
-        if len(my_args) > 2:
-            fun_name = my_args[2]
-            module = my_args[3]
+        if len(my_args) > 3:
+            fun_name = my_args[3]
+            module = my_args[4]
             if module not in sys.modules:
                 importlib.import_module(module)
             fun = eval(fun_name, sys.modules[module].__dict__)
