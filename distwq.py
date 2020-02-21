@@ -337,7 +337,7 @@ class MPIController(object):
         :return: return value of call.
         """
         if task_id in self.results:
-            return self.results[task_id]
+            return task_id, self.results[task_id]
         source = self.assigned[task_id]
         if self.workers_available:
             if self.worker_queue[source][0] != task_id:
