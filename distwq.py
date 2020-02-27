@@ -31,7 +31,7 @@ available, otherwise processes calls sequentially in one process.
 #  Imports
 #
 
-import sys, importlib, time, traceback, logging, uuid
+import sys, signal, importlib, time, traceback, logging, uuid
 from enum import Enum, IntEnum
 import numpy as np
 
@@ -96,6 +96,9 @@ else:
 is_worker = not is_controller
 n_workers = size - 1
 start_time = time.time()
+
+
+
 
 class MPIController(object):
 
@@ -824,6 +827,7 @@ def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=Fals
         if is_controller:  # I'm the controller
             assert(fun is not None)
             controller = MPIController(comm)
+            signal.signal(signal.SIGINT, lambda signum, frame: controller.abort())
             try:  # put everything in a try block to be able to exit!
                 fun(controller, *args)
             except ValueError:
