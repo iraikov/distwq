@@ -363,14 +363,14 @@ class MPIController(object):
         self.result_queue.remove(task_id)
         return task_id, result
 
-    def get_next_result(self):
+    def get_next_result(self, wait=True):
         """
         Return result of next earlier submitted call whose result has not yet
         been obtained.
 
         Can only be called by the controller.
 
-        If the call is not yet finished, waits for it to finish.
+        If wait=True and the call is not yet finished, waits for it to finish.
 
         :rtype:  object
         :return: id, return value of call, or None of there are no more calls in
@@ -379,7 +379,7 @@ class MPIController(object):
         if len(self.result_queue) > 0:
             task_id = self.result_queue.pop(0)
             return task_id, self.results[task_id]
-        elif len(self.task_queue) > 0:
+        elif wait and len(self.task_queue) > 0:
             task_id = self.task_queue[0]
             return self.get_result(task_id)
         else:
