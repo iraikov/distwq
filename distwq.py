@@ -178,7 +178,6 @@ class MPIController(object):
             tag = status.Get_tag()
             if tag == MessageTag.READY:
                 self.ready_workers.append(worker)
-            
             elif tag == MessageTag.DONE:
                 task_id, results, stats = data
                 self.results[task_id] = results
@@ -455,12 +454,13 @@ class MPIController(object):
             while self.get_next_result() is not None:
                 pass
             # tell workers to exit:
-            for worker in range(1, size):
+            for worker in range(1, n_workers+1):
                 logger.info(f"MPI controller : telling worker {worker} "
                             "to exit...")
                 req = comm.isend(None, dest=worker, tag=MessageTag.EXIT)
                 req.wait()
 
+                
     def abort(self):
         """
         Abort execution on all MPI nodes immediately.
@@ -508,7 +508,8 @@ class MPIWorker(object):
         # wait for orders:
         ready = True
         status = MPI.Status()
-        while True:
+        exit_flag = False
+        while not exit_flag:
             # signal the controller this worker is ready
             if ready:
                 req = self.comm.isend(None, dest=0, tag=MessageTag.READY)
@@ -523,6 +524,7 @@ class MPIWorker(object):
                 object_to_call = None
                 if tag == MessageTag.EXIT:
                     logger.info("MPI worker %d: exiting..." % rank)
+                    exit_flag = True
                     break
                 elif tag == MessageTag.TASK:
                     try:
