@@ -458,7 +458,6 @@ class MPIController(object):
                 logger.info(f"MPI controller : telling worker {worker} "
                             "to exit...")
                 req = comm.isend(None, dest=worker, tag=MessageTag.EXIT)
-                req.wait()
 
                 
     def abort(self):
