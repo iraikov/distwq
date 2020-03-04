@@ -20,7 +20,7 @@ def do_work(freq):
 
 
 def main(controller):
-    n = 10
+    n = 150
     for i in range(0, n):
         controller.submit_call("do_work", (i+1,), module_name="example_distwq")
     s = []

@@ -134,6 +134,11 @@ class MPIController(object):
         (list of lists)
         worker_queue[i] contains the ids of calls assigned to worker i.
         """
+        self.active_workers = set([])
+        """
+        (set)
+        active_workers contains the ids of workers that have communicated with the controller
+        """
         self.n_processed = np.zeros(size).astype(np.int)
         """
         (list of ints)
@@ -178,6 +183,7 @@ class MPIController(object):
             tag = status.Get_tag()
             if tag == MessageTag.READY:
                 self.ready_workers.append(worker)
+                self.active_workers.add(worker)
             elif tag == MessageTag.DONE:
                 task_id, results, stats = data
                 self.results[task_id] = results
@@ -454,11 +460,12 @@ class MPIController(object):
             while self.get_next_result() is not None:
                 pass
             # tell workers to exit:
-            for worker in range(1, n_workers+1):
+            reqs = []
+            for worker in self.active_workers:
                 logger.info(f"MPI controller : telling worker {worker} "
                             "to exit...")
-                req = comm.isend(None, dest=worker, tag=MessageTag.EXIT)
-
+                reqs.append(comm.isend(None, dest=worker, tag=MessageTag.EXIT))
+            MPI.Request.Waitall(reqs)
                 
     def abort(self):
         """
