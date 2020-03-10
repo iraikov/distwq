@@ -761,7 +761,7 @@ class MPICollectiveBroker(object):
                 sub_data = self.merged_comm.gather((result, this_stat), root=merged_rank)
                 req.wait()
                 results = [result for result, stat in sub_data if result is not None]
-                stats = [stat for result, stat in sub_data if result is not None]
+                stats = [stat for result, stat in sub_data if stat is not None]
             else:
                 raise RuntimeError('MPICollectiveBroker: unknown collective mode')
             logger.info("MPI collective broker %d: gathered %s results from workers..." % (rank-1, len(results)))
