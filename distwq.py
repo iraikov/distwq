@@ -766,8 +766,12 @@ class MPICollectiveBroker(object):
                 raise RuntimeError('MPICollectiveBroker: unknown collective mode')
             logger.info("MPI collective broker %d: gathered %s results from workers..." % (rank-1, len(results)))
             stat_times = np.asarray([stat["this_time"] for stat in stats])
-            max_time = np.argmax(stat_times)
-            stat = stats[max_time]
+            max_time = 0.
+            if len(stat_times) > 0:
+                max_time = np.argmax(stat_times)
+                stat = stats[max_time]
+            else:
+                stat = None
             logger.info("MPI collective broker %d: sending results to controller..." % (rank-1))
             req = self.comm.isend((task_id, results, stat), dest=0, tag=MessageTag.DONE)
             req.wait()
