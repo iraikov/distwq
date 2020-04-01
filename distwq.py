@@ -290,7 +290,7 @@ class MPIController(object):
                         ready_total_time_est = np.asarray([self.total_time_est[worker] for worker in self.ready_workers])
                         worker = self.ready_workers[np.argmin(ready_total_time_est)]
                     else:
-                        if worker is not in self.ready_workers:
+                        if worker not in self.ready_workers:
                             raise RuntimeError("worker ", str(worker), " is not in ready queue!")
 
                     # send name to call, args, time_est to worker:
@@ -887,7 +887,7 @@ def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=Fals
                                                 maxprocs=nprocs_per_worker-1 
                                                    if broker_is_worker else nprocs_per_worker)
                 if fun is not None:
-                    req = self.sub_comm.Ibarrier()
+                    req = sub_comm.Ibarrier()
                     sub_comm.bcast(args, root=MPI.ROOT)
                     req.wait()
                 broker=MPICollectiveBroker(comm, sub_comm, is_worker=broker_is_worker)
