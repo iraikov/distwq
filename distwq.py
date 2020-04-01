@@ -123,6 +123,7 @@ class MPIController(object):
         self.result_queue = []
         self.task_queue = []
         self.ready_workers = []
+        self.ready_workers_data = {}
         """(list) ids of submitted calls"""
         self.assigned = {}
         """
@@ -183,6 +184,7 @@ class MPIController(object):
             tag = status.Get_tag()
             if tag == MessageTag.READY:
                 self.ready_workers.append(worker)
+                self.ready_workers_data[worker] = data
                 self.active_workers.add(worker)
             elif tag == MessageTag.DONE:
                 task_id, results, stats = data
@@ -200,7 +202,7 @@ class MPIController(object):
             time.sleep(1)
         
     def submit_call(self, name_to_call, args=(), kwargs={},
-                    module_name="__main__", time_est=1, task_id=None):
+                    module_name="__main__", time_est=1, task_id=None, worker=None):
         """
         Submit a call for parallel execution.
 
@@ -284,8 +286,13 @@ class MPIController(object):
             while True:
                 self.recv()
                 if len(self.ready_workers) > 0:
-                    ready_total_time_est = np.asarray([self.total_time_est[worker] for worker in self.ready_workers])
-                    worker = self.ready_workers[np.argmin(ready_total_time_est)]
+                    if worker is None:
+                        ready_total_time_est = np.asarray([self.total_time_est[worker] for worker in self.ready_workers])
+                        worker = self.ready_workers[np.argmin(ready_total_time_est)]
+                    else:
+                        if worker is not in self.ready_workers:
+                            raise RuntimeError("worker ", str(worker), " is not in ready queue!")
+
                     # send name to call, args, time_est to worker:
                     logger.info(f"MPI controller : assigning call with id {task_id} to worker "
                                     f"{worker}: {name_to_call} {args} {kwargs} ...")
@@ -293,6 +300,7 @@ class MPIController(object):
                                           dest=worker, tag=MessageTag.TASK)
                     req.wait()
                     self.ready_workers.remove(worker)
+                    del(self.ready_workers_data[worker])
                     break
 
         else:
@@ -325,6 +333,22 @@ class MPIController(object):
         self.assigned[task_id] = worker
         return task_id
 
+    def get_ready_worker(self):
+        """
+        Returns the id and data of a ready worker.
+        If there are no workers, or no worker is ready, returns (None, None)
+        """
+        if self.workers_available:
+            self.recv()
+            if len(self.ready_workers) > 0:
+                ready_total_time_est = np.asarray([self.total_time_est[worker] for worker in self.ready_workers])
+                worker = self.ready_workers[np.argmin(ready_total_time_est)]
+                return worker, self.ready_workers_data[worker]
+            else:
+                return None, None
+        else:
+            return None, None
+    
     def get_result(self, task_id):
         """
         Return result of earlier submitted call.
@@ -480,7 +504,7 @@ class MPIController(object):
         
 class MPIWorker(object):        
 
-    def __init__(self, comm):
+    def __init__(self, comm, ready_data=None):
         self.comm = comm
         self.worker_id = rank
         self.total_time_est = np.zeros(size)*np.nan
@@ -490,6 +514,7 @@ class MPIWorker(object):
         self.total_time = np.zeros(size)*np.nan
         self.total_time[rank] = 0
         self.stats = []
+        self.ready_data = None
         logger.info("MPI worker %d: initialized." % self.worker_id)
         
     def serve(self):
@@ -519,7 +544,7 @@ class MPIWorker(object):
         while not exit_flag:
             # signal the controller this worker is ready
             if ready:
-                req = self.comm.isend(None, dest=0, tag=MessageTag.READY)
+                req = self.comm.isend(self.ready_data, dest=0, tag=MessageTag.READY)
                 req.wait()
             
             # get next task from queue:
@@ -661,7 +686,7 @@ class MPICollectiveWorker(object):
         
 class MPICollectiveBroker(object):        
 
-    def __init__(self, comm, sub_comm, is_worker=False, collective_mode=CollectiveMode.Gather):
+    def __init__(self, comm, sub_comm, ready_data=None, is_worker=False, collective_mode=CollectiveMode.Gather):
         logger.info('MPI collective broker %d starting' % rank)
         assert(not spawned)
         self.collective_mode=collective_mode
@@ -677,6 +702,7 @@ class MPICollectiveBroker(object):
         self.total_time[rank] = 0
         self.stats = []
         self.is_worker = is_worker
+        self.ready_data = ready_data
         
     def serve(self):
         """
@@ -705,7 +731,7 @@ class MPICollectiveBroker(object):
         # wait for orders:
         while True:
             # signal the controller this worker is ready
-            req = self.comm.isend(None, dest=0, tag=MessageTag.READY)
+            req = self.comm.isend(self.ready_data, dest=0, tag=MessageTag.READY)
             req.wait()
             logger.info("MPI collective broker %d: getting next task from controller..." % self.worker_id)
 
@@ -861,7 +887,9 @@ def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=Fals
                                                 maxprocs=nprocs_per_worker-1 
                                                    if broker_is_worker else nprocs_per_worker)
                 if fun is not None:
+                    req = self.sub_comm.Ibarrier()
                     sub_comm.bcast(args, root=MPI.ROOT)
+                    req.wait()
                 broker=MPICollectiveBroker(comm, sub_comm, is_worker=broker_is_worker)
                 if broker_is_worker and (fun is not None):
                     fun(broker, *args)
@@ -900,7 +928,9 @@ if __name__ == '__main__':
             fun = eval(fun_name, sys.modules[module].__dict__)
         if fun is not None:
             parent_comm = MPI.Comm.Get_parent()
+            req = self.sub_comm.Ibarrier()
             args = parent_comm.bcast(None, root=0)
-            fun(worker, *args)
+            req.wait()
+            ret_val = fun(worker, *args)
         worker.serve()
     
