@@ -601,8 +601,10 @@ class MPICollectiveWorker(object):
         self.comm = comm
         self.parent_comm = self.comm.Get_parent()
         assert self.parent_comm != MPI.COMM_NULL
+        req = self.parent_comm.Ibarrier()
         self.merged_comm = self.parent_comm.Merge(True)
-
+        req.wait()
+        
         self.total_time_est = np.zeros(size)*np.nan
         self.total_time_est[rank] = 0
         self.n_processed = np.zeros(size)*np.nan
@@ -694,7 +696,11 @@ class MPICollectiveBroker(object):
         self.comm = comm
         self.worker_id = rank
         self.sub_comm = sub_comm
+        
+        req = self.sub_comm.Ibarrier()
         self.merged_comm = sub_comm.Merge(False)
+        req.wait()
+        
         self.total_time_est = np.zeros(size)*np.nan
         self.total_time_est[rank] = 0
         self.n_processed = np.zeros(size)*np.nan
@@ -888,7 +894,9 @@ def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=Fals
                                                 maxprocs=nprocs_per_worker-1 
                                                    if broker_is_worker else nprocs_per_worker)
                 if fun is not None:
+                    req = sub_comm.Ibarrier()
                     sub_comm.bcast(args, root=MPI.ROOT)
+                    req.wait()
                 broker=MPICollectiveBroker(comm, sub_comm, is_worker=broker_is_worker)
                 if broker_is_worker and (fun is not None):
                     fun(broker, *args)
@@ -927,7 +935,9 @@ if __name__ == '__main__':
             fun = eval(fun_name, sys.modules[module].__dict__)
         if fun is not None:
             parent_comm = MPI.Comm.Get_parent()
+            req = parent_comm.Ibarrier()
             args = parent_comm.bcast(None, root=0)
+            req.wait()
             ret_val = fun(worker, *args)
         worker.serve()
     
