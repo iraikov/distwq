@@ -86,20 +86,18 @@ if has_mpi:
     size = comm.size
     rank = comm.rank
     is_controller = (not spawned) and (rank == 0)
+    is_worker = not is_controller
     if size < 2:
         workers_available = False
+        is_worker = True
 else:
     size = 1
     rank = 0
     is_controller = True
-
+    is_worker = True
     
-is_worker = not is_controller
 n_workers = size - 1
 start_time = time.time()
-
-
-
 
 class MPIController(object):
 
@@ -177,6 +175,8 @@ class MPIController(object):
         """
         Process incoming messages.
         """
+        if not self.workers_available:
+            return
         if self.comm.Iprobe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG):
 
             status = MPI.Status()
