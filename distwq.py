@@ -303,6 +303,9 @@ class MPIController(object):
                     self.ready_workers.remove(worker)
                     del(self.ready_workers_data[worker])
                     break
+            self.task_queue.append(task_id)
+            self.worker_queue[worker].append(task_id)
+            self.assigned[task_id] = worker
 
         else:
             # perform call on this rank if no workers are available:
@@ -319,19 +322,17 @@ class MPIController(object):
                 raise
             call_time = time.time()
             self.results[task_id] = object_to_call(*args, **kwargs)
+            self.result_queue.append(task_id)
             this_time = time.time() - call_time
             self.n_processed[0] += 1
             self.total_time[0] = time.time() - start_time
-            self.stats.append({"id":task_id, "rank": 0,
+            self.stats.append({"id":task_id, "rank": worker,
                                "this_time": this_time,
                                "time_over_est": this_time / time_est,
                                "n_processed": self.n_processed[0],
                                "total_time": self.total_time[0]})
 
         self.total_time_est[worker] += time_est
-        self.task_queue.append(task_id)
-        self.worker_queue[worker].append(task_id)
-        self.assigned[task_id] = worker
         return task_id
 
     def get_ready_worker(self):
