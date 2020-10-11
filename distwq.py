@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # try to get the communicator object to see whether mpi is available:
 try:
     from mpi4py import MPI
-    comm = MPI.COMM_WORLD
+    world_comm = MPI.COMM_WORLD
     has_mpi = True
 except ImportError:
     has_mpi = False
@@ -83,10 +83,11 @@ workers_available = True
 spawned = False
 if has_mpi:
     spawned = (my_args[0] == 'distwq:spawned') if my_args is not None else False
-    size = comm.size
-    rank = comm.rank
+    size = world_comm.size
+    rank = world_comm.rank
     is_controller = (not spawned) and (rank == 0)
     is_worker = not is_controller
+    group_comm = world_comm.Split(1 if is_controller else 2, 0)
     if size < 2:
         workers_available = False
         is_worker = True
@@ -490,7 +491,7 @@ class MPIController(object):
             for worker in self.active_workers:
                 logger.info(f"MPI controller : telling worker {worker} "
                             "to exit...")
-                reqs.append(comm.isend(None, dest=worker, tag=MessageTag.EXIT))
+                reqs.append(self.comm.isend(None, dest=worker, tag=MessageTag.EXIT))
             MPI.Request.Waitall(reqs)
                 
     def abort(self):
@@ -600,12 +601,19 @@ class MPICollectiveWorker(object):
         self.collective_mode = collective_mode
         self.worker_id = worker_id
         self.comm = comm
+
+        self.worker_port = None
+        self.worker_comm = None
+        self.worker_service = "distwq.init"
+        self.service_published = False
+
         self.parent_comm = self.comm.Get_parent()
         assert self.parent_comm != MPI.COMM_NULL
         req = self.parent_comm.Ibarrier()
         self.merged_comm = self.parent_comm.Merge(True)
         req.wait()
-        
+
+
         self.total_time_est = np.zeros(size)*np.nan
         self.total_time_est[rank] = 0
         self.n_processed = np.zeros(size)*np.nan
@@ -613,6 +621,26 @@ class MPICollectiveWorker(object):
         self.total_time = np.zeros(size)*np.nan
         self.total_time[rank] = 0
         self.stats = []
+
+    def publish_service(self):
+        if not self.service_published:
+            if rank == 0:
+                self.worker_port = MPI.Open_port()
+                MPI.Publish_name(self.worker_service, self.worker_port)
+                self.comm.bcast(self.worker_port, root=0)
+            else:
+                self.worker_port = self.comm.bcast(None, root=0)
+            self.service_published = True
+                
+        
+    def connect_service(self):
+        if not self.service_published:
+            self.worker_port = MPI.Lookup_name(self.worker_service)
+            self.worker_comm = self.comm.Connect(self.worker_port, root=0)
+        else:
+            self.worker_comm = self.comm.Accept(self.worker_port)
+        
+
         
     def serve(self):
         """
@@ -651,6 +679,11 @@ class MPICollectiveWorker(object):
             # TODO: add timeout and check whether controller lives!
             if name_to_call == "exit":
                 logger.info("MPI collective worker %d-%d: exiting..." % (self.worker_id, rank))
+                if self.worker_comm is not None:
+                    self.worker_comm.Disconnect()
+                if self.service_published and (rank == 0):
+                    MPI.Unpublish_name(self.worker_service, self.worker_port)
+                    MPI.Close_port(self.worker_port)
                 self.merged_comm.Disconnect()
                 self.parent_comm.Disconnect()
                 break
@@ -695,13 +728,13 @@ class MPICollectiveBroker(object):
         assert(not spawned)
         self.collective_mode=collective_mode
         self.comm = comm
-        self.worker_id = rank
         self.sub_comm = sub_comm
+        self.worker_id = rank
         
         req = self.sub_comm.Ibarrier()
         self.merged_comm = sub_comm.Merge(False)
         req.wait()
-        
+
         self.total_time_est = np.zeros(size)*np.nan
         self.total_time_est[rank] = 0
         self.n_processed = np.zeros(size)*np.nan
@@ -874,7 +907,7 @@ def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=Fals
     if has_mpi:  # run in mpi mode
         if is_controller:  # I'm the controller
             assert(fun is not None)
-            controller = MPIController(comm)
+            controller = MPIController(world_comm)
             signal.signal(signal.SIGINT, lambda signum, frame: controller.abort())
             try:  # put everything in a try block to be able to exit!
                 fun(controller, *args)
@@ -888,22 +921,23 @@ def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=Fals
             if spawn_workers and (nprocs_per_worker==1) and broker_is_worker:
                 raise RuntimeException("distwq.run: cannot spawn workers when nprocs_per_worker=1 and broker_is_worker is set to True")
             if spawn_workers:
+                
                 arglist = ['-m', 'distwq', '-', 'distwq:spawned', '%d' % worker_id, '%d' % (1 if verbose else 0)]
                 if fun is not None:
                     arglist += [str(fun_name), str(module_name)]
                 sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
-                                                maxprocs=nprocs_per_worker-1 
-                                                   if broker_is_worker else nprocs_per_worker)
+                                               maxprocs=nprocs_per_worker-1 
+                                               if broker_is_worker else nprocs_per_worker)
                 if fun is not None:
                     req = sub_comm.Ibarrier()
                     sub_comm.bcast(args, root=MPI.ROOT)
                     req.wait()
-                broker=MPICollectiveBroker(comm, sub_comm, is_worker=broker_is_worker)
+                broker=MPICollectiveBroker(world_comm, sub_comm, is_worker=broker_is_worker)
                 if broker_is_worker and (fun is not None):
                     fun(broker, *args)
                 broker.serve()
             else:
-                worker = MPIWorker(comm)
+                worker = MPIWorker(comm, group_comm)
                 if fun is not None:
                     fun(worker, *args)
                 worker.serve()
@@ -926,7 +960,7 @@ if __name__ == '__main__':
             logging.basicConfig(level=logging.WARN)
         logger.info('MPI collective worker %d-%d starting' % (worker_id, rank))
         logger.info('MPI collective worker %d-%d args: %s' % (worker_id, rank, str(my_args)))
-        worker = MPICollectiveWorker(comm, worker_id)
+        worker = MPICollectiveWorker(world_comm, worker_id)
         fun = None
         if len(my_args) > 3:
             fun_name = my_args[3]
@@ -935,10 +969,13 @@ if __name__ == '__main__':
                 importlib.import_module(module)
             fun = eval(fun_name, sys.modules[module].__dict__)
         if fun is not None:
+            if worker_id == 1:
+                worker.publish_service()
             parent_comm = MPI.Comm.Get_parent()
             req = parent_comm.Ibarrier()
             args = parent_comm.bcast(None, root=0)
             req.wait()
+            worker.connect_service()
             ret_val = fun(worker, *args)
         worker.serve()
     

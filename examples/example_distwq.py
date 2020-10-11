@@ -6,6 +6,7 @@ import distwq
 import numpy as np  
 import scipy
 from scipy import signal
+from mpi4py import MPI
 
 def do_work(freq):
     rng = np.random.RandomState()
@@ -20,9 +21,20 @@ def do_work(freq):
     f, pdens = signal.periodogram(x, fs)
     return f, pdens
 
-
+def init(worker):
+    if worker.worker_id == 1:
+        if worker.comm.rank == 0:
+            root=MPI.ROOT
+        else:
+            root=MPI.PROC_NULL
+    else:
+        root = 0
+    data = worker.worker_comm.alltoall(['inter alltoall']*3)
+    assert (data == ['inter alltoall']*3)
+    
+    
 def main(controller):
-    n = 150
+    n = 5
     for i in range(0, n):
         controller.submit_call("do_work", (i+1,), module_name="example_distwq")
     s = []
@@ -35,4 +47,4 @@ if __name__ == '__main__':
     if distwq.is_controller:
         distwq.run(fun_name="main", verbose=True, nprocs_per_worker=3)
     else:
-        distwq.run(fun_name=None, verbose=True, nprocs_per_worker=3)
+        distwq.run(fun_name="init", module_name="example_distwq", verbose=True, nprocs_per_worker=3)
