@@ -636,6 +636,7 @@ class MPICollectiveWorker(object):
                 self.comm.bcast(self.worker_port, root=0)
             else:
                 self.worker_port = self.comm.bcast(None, root=0)
+            self.comm.barrier()
             self.service_published = True
                 
         
