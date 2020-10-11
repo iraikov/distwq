@@ -597,14 +597,14 @@ class MPIWorker(object):
 
 class MPICollectiveWorker(object):
 
-    def __init__(self, comm, worker_id, collective_mode=CollectiveMode.Gather):
+    def __init__(self, comm, worker_id, worker_service="distwq.init", collective_mode=CollectiveMode.Gather):
         self.collective_mode = collective_mode
         self.worker_id = worker_id
         self.comm = comm
 
         self.worker_port = None
         self.worker_comm = None
-        self.worker_service = "distwq.init"
+        self.worker_service = worker_service
         self.service_published = False
 
         self.parent_comm = self.comm.Get_parent()
@@ -625,6 +625,9 @@ class MPICollectiveWorker(object):
     def publish_service(self):
         if not self.service_published:
             if rank == 0:
+                found = MPI.Lookup_name(self.worker_service)
+                if found:
+                    MPI.Unpublish_name(self.worker_service, found)
                 self.worker_port = MPI.Open_port()
                 MPI.Publish_name(self.worker_service, self.worker_port)
                 self.comm.bcast(self.worker_port, root=0)
@@ -866,7 +869,10 @@ class MPICollectiveBroker(object):
 
 
 
-def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=False, nprocs_per_worker=1, broker_is_worker=False, args=()):
+def run(fun_name=None, module_name='__main__', verbose=False,
+        spawn_workers=False, nprocs_per_worker=1, broker_is_worker=False,
+        worker_service="distwq.init",
+        args=()):
     """
     Run in controller/worker mode until fun(controller/worker) finishes.
 
@@ -922,7 +928,7 @@ def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=Fals
                 raise RuntimeException("distwq.run: cannot spawn workers when nprocs_per_worker=1 and broker_is_worker is set to True")
             if spawn_workers:
                 
-                arglist = ['-m', 'distwq', '-', 'distwq:spawned', '%d' % worker_id, '%d' % (1 if verbose else 0)]
+                arglist = ['-m', 'distwq', '-', 'distwq:spawned', '%d' % worker_id, worker_service, '%d' % (1 if verbose else 0)]
                 if fun is not None:
                     arglist += [str(fun_name), str(module_name)]
                 sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
@@ -952,7 +958,8 @@ def run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=Fals
 if __name__ == '__main__':
     if is_worker:
         worker_id = int(my_args[1])
-        verbose_flag = int(my_args[2])
+        worker_service = my_args[2]
+        verbose_flag = int(my_args[3])
         verbose = True if verbose_flag == 1 else False
         if verbose:
             logging.basicConfig(level=logging.INFO)
@@ -960,11 +967,11 @@ if __name__ == '__main__':
             logging.basicConfig(level=logging.WARN)
         logger.info('MPI collective worker %d-%d starting' % (worker_id, rank))
         logger.info('MPI collective worker %d-%d args: %s' % (worker_id, rank, str(my_args)))
-        worker = MPICollectiveWorker(world_comm, worker_id)
+        worker = MPICollectiveWorker(world_comm, worker_id, worker_service=worker_service)
         fun = None
-        if len(my_args) > 3:
-            fun_name = my_args[3]
-            module = my_args[4]
+        if len(my_args) > 4:
+            fun_name = my_args[4]
+            module = my_args[5]
             if module not in sys.modules:
                 importlib.import_module(module)
             fun = eval(fun_name, sys.modules[module].__dict__)
