@@ -625,9 +625,12 @@ class MPICollectiveWorker(object):
     def publish_service(self):
         if not self.service_published:
             if rank == 0:
-                found = MPI.Lookup_name(self.worker_service)
-                if found:
-                    MPI.Unpublish_name(self.worker_service, found)
+                try:
+                    found = MPI.Lookup_name(self.worker_service)
+                    if found:
+                        MPI.Unpublish_name(self.worker_service, found)
+                except MPI.Exception:
+                    pass
                 self.worker_port = MPI.Open_port()
                 MPI.Publish_name(self.worker_service, self.worker_port)
                 self.comm.bcast(self.worker_port, root=0)
