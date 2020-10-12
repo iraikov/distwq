@@ -97,7 +97,7 @@ else:
     is_controller = True
     is_worker = True
     
-n_workers = size - 1
+n_workers = size - 1 if not spawned else int(my_args[2])
 start_time = time.time()
 
 class MPIController(object):
@@ -597,13 +597,14 @@ class MPIWorker(object):
 
 class MPICollectiveWorker(object):
 
-    def __init__(self, comm, worker_id, worker_service="distwq.init", collective_mode=CollectiveMode.Gather):
+    def __init__(self, comm, worker_id, worker_service=b"distwq.init", collective_mode=CollectiveMode.Gather):
         self.collective_mode = collective_mode
         self.worker_id = worker_id
         self.comm = comm
 
         self.worker_port = None
-        self.worker_comm = None
+        self.server_worker_comm = None
+        self.client_worker_comms = []
         self.worker_service = worker_service
         self.service_published = False
 
@@ -632,7 +633,8 @@ class MPICollectiveWorker(object):
                 except MPI.Exception:
                     pass
                 self.worker_port = MPI.Open_port()
-                MPI.Publish_name(self.worker_service, self.worker_port)
+                info = MPI.INFO_NULL
+                MPI.Publish_name(self.worker_service, info, self.worker_port)
                 self.comm.bcast(self.worker_port, root=0)
             else:
                 self.worker_port = self.comm.bcast(None, root=0)
@@ -641,11 +643,20 @@ class MPICollectiveWorker(object):
                 
         
     def connect_service(self):
+        info = MPI.INFO_NULL
         if not self.service_published:
-            self.worker_port = MPI.Lookup_name(self.worker_service)
-            self.worker_comm = self.comm.Connect(self.worker_port, root=0)
+            if rank == 0:
+                self.worker_port = MPI.Lookup_name(self.worker_service)
+                self.comm.bcast(self.worker_port, root=0)
+            else:
+                self.worker_port = self.comm.bcast(None, root=0)
+            if not self.worker_port:
+                raise RuntimeException("connect_service: unable to lookup service %s" % self.worker_service)
+            self.server_worker_comm = self.comm.Connect(self.worker_port, info, root=0)
         else:
-            self.worker_comm = self.comm.Accept(self.worker_port)
+            for i in range(n_workers-1):
+                client_worker_comm = self.comm.Accept(self.worker_port, info, root=0)
+                self.client_worker_comms.append(client_worker_comm)
         
 
         
@@ -686,8 +697,10 @@ class MPICollectiveWorker(object):
             # TODO: add timeout and check whether controller lives!
             if name_to_call == "exit":
                 logger.info("MPI collective worker %d-%d: exiting..." % (self.worker_id, rank))
-                if self.worker_comm is not None:
-                    self.worker_comm.Disconnect()
+                if self.server_worker_comm is not None:
+                    self.server_worker_comm.Disconnect()
+                for client_worker_comm in self.client_worker_comms:
+                    client_worker_comm.Disconnect()
                 if self.service_published and (rank == 0):
                     MPI.Unpublish_name(self.worker_service, self.worker_port)
                     MPI.Close_port(self.worker_port)
@@ -932,7 +945,8 @@ def run(fun_name=None, module_name='__main__', verbose=False,
                 raise RuntimeException("distwq.run: cannot spawn workers when nprocs_per_worker=1 and broker_is_worker is set to True")
             if spawn_workers:
                 
-                arglist = ['-m', 'distwq', '-', 'distwq:spawned', '%d' % worker_id, worker_service, '%d' % (1 if verbose else 0)]
+                arglist = ['-m', 'distwq', '-', 'distwq:spawned', '%d' % worker_id, '%d' % n_workers,
+                           worker_service, '%d' % (1 if verbose else 0)]
                 if fun is not None:
                     arglist += [str(fun_name), str(module_name)]
                 sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
@@ -962,8 +976,8 @@ def run(fun_name=None, module_name='__main__', verbose=False,
 if __name__ == '__main__':
     if is_worker:
         worker_id = int(my_args[1])
-        worker_service = my_args[2]
-        verbose_flag = int(my_args[3])
+        worker_service = my_args[3]
+        verbose_flag = int(my_args[4])
         verbose = True if verbose_flag == 1 else False
         if verbose:
             logging.basicConfig(level=logging.INFO)
@@ -973,9 +987,9 @@ if __name__ == '__main__':
         logger.info('MPI collective worker %d-%d args: %s' % (worker_id, rank, str(my_args)))
         worker = MPICollectiveWorker(world_comm, worker_id, worker_service=worker_service)
         fun = None
-        if len(my_args) > 4:
-            fun_name = my_args[4]
-            module = my_args[5]
+        if len(my_args) > 5:
+            fun_name = my_args[5]
+            module = my_args[6]
             if module not in sys.modules:
                 importlib.import_module(module)
             fun = eval(fun_name, sys.modules[module].__dict__)
