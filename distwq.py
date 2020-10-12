@@ -642,13 +642,12 @@ class MPICollectiveWorker(object):
             self.service_published = True
                 
         
-    def connect_service(self):
+    def connect_service(self, n_lookup_attempts=5):
         info = MPI.INFO_NULL
         if not self.service_published:
             if rank == 0:
-                n_attemps = 3
                 attempt = 0
-                while attempt < n_attemps:
+                while attempt < n_lookup_attempts:
                     try:
                         self.worker_port = MPI.Lookup_name(self.worker_service)
                     except MPI.Exception as e:
@@ -663,7 +662,7 @@ class MPICollectiveWorker(object):
                 self.worker_port = self.comm.bcast(None, root=0)
             self.comm.barrier()
             if not self.worker_port:
-                raise RuntimeException("connect_service: unable to lookup service %s" % self.worker_service)
+                raise RuntimeError("connect_service: unable to lookup service %s" % self.worker_service)
             self.server_worker_comm = self.comm.Connect(self.worker_port, info, root=0)
         else:
             for i in range(n_workers-1):
@@ -955,7 +954,7 @@ def run(fun_name=None, module_name='__main__', verbose=False,
             if (n_workers > 0) and (nprocs_per_worker > 1):
                 spawn_workers = True
             if spawn_workers and (nprocs_per_worker==1) and broker_is_worker:
-                raise RuntimeException("distwq.run: cannot spawn workers when nprocs_per_worker=1 and broker_is_worker is set to True")
+                raise RuntimeError("distwq.run: cannot spawn workers when nprocs_per_worker=1 and broker_is_worker is set to True")
             if spawn_workers:
                 
                 arglist = ['-m', 'distwq', '-', 'distwq:spawned', '%d' % worker_id, '%d' % n_workers,
@@ -1014,7 +1013,7 @@ if __name__ == '__main__':
             req = parent_comm.Ibarrier()
             args = parent_comm.bcast(None, root=0)
             req.wait()
-            worker.connect_service()
+            worker.connect_service(n_lookup_attempts=5)
             ret_val = fun(worker, *args)
         worker.serve()
     
