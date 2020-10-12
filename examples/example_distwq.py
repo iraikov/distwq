@@ -33,12 +33,12 @@ def init(worker):
         root = 0
     if worker.server_worker_comm is not None:
         data = worker.server_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
-        assert (data == ['inter alltoall']*3)
+        assert (data == ['inter alltoall']*nprocs_per_worker)
         worker.server_worker_comm.barrier()
     else:
         for client_worker_comm in worker.client_worker_comms:
             data = client_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
-            assert (data == ['inter alltoall']*3)
+            assert (data == ['inter alltoall']*nprocs_per_worker)
             client_worker_comm.barrier()
     
     

@@ -646,10 +646,22 @@ class MPICollectiveWorker(object):
         info = MPI.INFO_NULL
         if not self.service_published:
             if rank == 0:
-                self.worker_port = MPI.Lookup_name(self.worker_service)
+                n_attemps = 3
+                attempt = 0
+                while attempt < n_attemps:
+                    try:
+                        self.worker_port = MPI.Lookup_name(self.worker_service)
+                    except MPI.Exception as e:
+                        if e.Get_error_class() == MPI.ERR_NAME:
+                            time.sleep(1)
+                        else:
+                            raise e
+                    attempt += 1
+                assert(self.worker_port is not None)
                 self.comm.bcast(self.worker_port, root=0)
             else:
                 self.worker_port = self.comm.bcast(None, root=0)
+            self.comm.barrier()
             if not self.worker_port:
                 raise RuntimeException("connect_service: unable to lookup service %s" % self.worker_service)
             self.server_worker_comm = self.comm.Connect(self.worker_port, info, root=0)
@@ -930,6 +942,7 @@ def run(fun_name=None, module_name='__main__', verbose=False,
     if has_mpi:  # run in mpi mode
         if is_controller:  # I'm the controller
             assert(fun is not None)
+            world_comm.barrier()
             controller = MPIController(world_comm)
             signal.signal(signal.SIGINT, lambda signum, frame: controller.abort())
             try:  # put everything in a try block to be able to exit!
@@ -952,6 +965,7 @@ def run(fun_name=None, module_name='__main__', verbose=False,
                 sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
                                                maxprocs=nprocs_per_worker-1 
                                                if broker_is_worker else nprocs_per_worker)
+                world_comm.barrier()
                 if fun is not None:
                     req = sub_comm.Ibarrier()
                     sub_comm.bcast(args, root=MPI.ROOT)
@@ -994,9 +1008,9 @@ if __name__ == '__main__':
                 importlib.import_module(module)
             fun = eval(fun_name, sys.modules[module].__dict__)
         if fun is not None:
+            parent_comm = MPI.Comm.Get_parent()
             if worker_id == 1:
                 worker.publish_service()
-            parent_comm = MPI.Comm.Get_parent()
             req = parent_comm.Ibarrier()
             args = parent_comm.bcast(None, root=0)
             req.wait()
