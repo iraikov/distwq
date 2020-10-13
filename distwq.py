@@ -88,7 +88,7 @@ if has_mpi:
     rank = world_comm.rank
     is_controller = (not spawned) and (rank == 0)
     is_worker = not is_controller
-    group_comm = world_comm.Split(1 if is_controller else 2, 0)
+    group_comm = world_comm.Split(2 if is_controller else 1, 0)
     if size < 2:
         workers_available = False
         is_worker = True
@@ -511,8 +511,9 @@ class MPIController(object):
         
 class MPIWorker(object):        
 
-    def __init__(self, comm, ready_data=None):
+    def __init__(self, comm, group_comm, ready_data=None):
         self.comm = comm
+        self.group_comm = group_comm
         self.worker_id = rank
         self.total_time_est = np.zeros(size)*np.nan
         self.total_time_est[rank] = 0
@@ -769,11 +770,13 @@ class MPICollectiveWorker(object):
         
 class MPICollectiveBroker(object):        
 
-    def __init__(self, comm, sub_comm, ready_data=None, is_worker=False, collective_mode=CollectiveMode.Gather):
+    def __init__(self, comm, group_comm, sub_comm, ready_data=None, is_worker=False, 
+                 collective_mode=CollectiveMode.Gather):
         logger.info('MPI collective broker %d starting' % rank)
         assert(not spawned)
         self.collective_mode=collective_mode
         self.comm = comm
+        self.group_comm = group_comm
         self.sub_comm = sub_comm
         self.worker_id = rank
         
@@ -1002,14 +1005,14 @@ def run(fun_name=None, module_name='__main__',
                     req = sub_comm.Ibarrier()
                     sub_comm.bcast(args, root=MPI.ROOT)
                     req.wait()
-                broker=MPICollectiveBroker(world_comm, sub_comm, is_worker=broker_is_worker)
+                broker=MPICollectiveBroker(world_comm, group_comm, sub_comm, is_worker=broker_is_worker)
                 if broker_is_worker and (fun is not None):
                     fun(broker, *args)
                 elif broker_fun is not None:
                     broker_fun(broker, *args)
                 broker.serve()
             else:
-                worker = MPIWorker(comm, group_comm)
+                worker = MPIWorker(world_comm, group_comm)
                 if fun is not None:
                     fun(worker, *args)
                 worker.serve()

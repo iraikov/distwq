@@ -35,8 +35,6 @@ def init(worker):
     worker.comm.barrier()
         
 def broker_init(broker):
-
-    broker_comm = broker.comm.Split(2, 0)
     
     data = None
     if broker.worker_id == 1:
@@ -45,22 +43,19 @@ def broker_init(broker):
         tag = status.Get_tag()
 
     if broker.worker_id == 1:
-        broker_comm.bcast(data, root=0)
+        broker.group_comm.bcast(data, root=0)
     else:
-        data = broker_comm.bcast(None, root=0)
-    broker_comm.barrier()
+        data = broker.group_comm.bcast(None, root=0)
+    broker.group_comm.barrier()
     print("broker %d: data = %s" % (broker.worker_id, str(data)))
 
     if broker.worker_id != 1:
         req = broker.sub_comm.Ibarrier()
         broker.sub_comm.bcast(data, root=MPI.ROOT)
         req.wait()
-    broker_comm.barrier()
-    broker_comm.Free()
+    broker.group_comm.barrier()
     
 def main(controller):
-    controller_comm = controller.comm.Split(1, 0)
-    controller_comm.Free()
     
     n = 5
     for i in range(0, n):
