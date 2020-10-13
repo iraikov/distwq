@@ -8,7 +8,7 @@ import scipy
 from scipy import signal
 from mpi4py import MPI
 
-nprocs_per_worker = 1
+nprocs_per_worker = 3
 
 def do_work(freq):
     rng = np.random.RandomState()
@@ -30,13 +30,13 @@ def init(worker):
     else:
         req = worker.parent_comm.Ibarrier()
         data = worker.parent_comm.bcast(None, root=0)
-        print("worker %d: data = %s" % (worker.worker_id, str(data)))
+        print("worker %d / rank %d: data = %s" % (worker.worker_id, worker.comm.rank, str(data)))
         req.wait()
     worker.comm.barrier()
         
 def broker_init(broker):
 
-    broker_comm = broker.comm.Split(1 if broker.comm.rank > 0 else 2, 0)
+    broker_comm = broker.comm.Split(2, 0)
     
     data = None
     if broker.worker_id == 1:
@@ -45,10 +45,10 @@ def broker_init(broker):
         tag = status.Get_tag()
 
     if broker.worker_id == 1:
-        broker_comm.bcast(data, root=1)
+        broker_comm.bcast(data, root=0)
     else:
-        data = broker_comm.bcast(None, root=1)
-
+        data = broker_comm.bcast(None, root=0)
+    broker_comm.barrier()
     print("broker %d: data = %s" % (broker.worker_id, str(data)))
 
     if broker.worker_id != 1:
@@ -59,7 +59,7 @@ def broker_init(broker):
     broker_comm.Free()
     
 def main(controller):
-    controller_comm = controller.comm.Split(2, 0)
+    controller_comm = controller.comm.Split(1, 0)
     controller_comm.Free()
     
     n = 5
