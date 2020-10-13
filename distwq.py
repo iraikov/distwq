@@ -837,7 +837,6 @@ class MPICollectiveBroker(object):
                 self.merged_comm.scatter([("exit", (), {}, "", 0, 0)]*merged_size, root=0)
                 req.wait()
                 self.merged_comm.Disconnect()
-                self.sub_comm.Disconnect()
                 break
             elif tag == MessageTag.TASK:
                 (name_to_call, args, kwargs, module, time_est, task_id) = data
