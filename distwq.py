@@ -31,7 +31,7 @@ available, otherwise processes calls sequentially in one process.
 #  Imports
 #
 
-import sys, signal, importlib, time, traceback, logging, uuid
+import sys, signal, importlib, time, traceback, logging, random, uuid
 from enum import Enum, IntEnum
 import numpy as np
 
@@ -652,7 +652,7 @@ class MPICollectiveWorker(object):
                         self.worker_port = MPI.Lookup_name(self.worker_service)
                     except MPI.Exception as e:
                         if e.Get_error_class() == MPI.ERR_NAME:
-                            time.sleep(1)
+                            time.sleep(random.randrange(1,5))
                         else:
                             raise e
                     attempt += 1
