@@ -8,7 +8,7 @@ import scipy
 from scipy import signal
 from mpi4py import MPI
 
-nprocs_per_worker = 1
+nprocs_per_worker = 3
 
 def do_work(freq):
     rng = np.random.RandomState()
@@ -25,43 +25,24 @@ def do_work(freq):
 
 def init(worker):
     if worker.worker_id == 1:
-        req = worker.parent_comm.isend("inter send", dest=0)
-        req.wait()
+        if worker.comm.rank == 0:
+            root=MPI.ROOT
+        else:
+            root=MPI.PROC_NULL
     else:
-        req = worker.parent_comm.Ibarrier()
-        data = worker.parent_comm.bcast(None, root=0)
-        print("worker %d: data = %s" % (worker.worker_id, str(data)))
-        req.wait()
-    worker.comm.barrier()
-        
-def broker_init(broker):
-
-    broker_comm = broker.comm.Split(1 if broker.comm.rank > 0 else 2, 0)
+        root = 0
+    if worker.server_worker_comm is not None:
+        data = worker.server_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
+        assert (data == ['inter alltoall']*nprocs_per_worker)
+        worker.server_worker_comm.barrier()
+    else:
+        for client_worker_comm in worker.client_worker_comms:
+            data = client_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
+            assert (data == ['inter alltoall']*nprocs_per_worker)
+            client_worker_comm.barrier()
     
-    data = None
-    if broker.worker_id == 1:
-        status = MPI.Status()
-        data = broker.sub_comm.recv(source=0, tag=MPI.ANY_TAG, status=status)
-        tag = status.Get_tag()
-
-    if broker.worker_id == 1:
-        broker_comm.bcast(data, root=1)
-    else:
-        data = broker_comm.bcast(None, root=1)
-
-    print("broker %d: data = %s" % (broker.worker_id, str(data)))
-
-    if broker.worker_id != 1:
-        req = broker.sub_comm.Ibarrier()
-        broker.sub_comm.bcast(data, root=MPI.ROOT)
-        req.wait()
-    broker_comm.barrier()
-    broker_comm.Free()
     
 def main(controller):
-    controller_comm = controller.comm.Split(2, 0)
-    controller_comm.Free()
-    
     n = 5
     for i in range(0, n):
         controller.submit_call("do_work", (i+1,), module_name="example_distwq")
@@ -71,11 +52,12 @@ def main(controller):
     controller.info()
     pprint.pprint(s)
 
+    
 if __name__ == '__main__':
     if distwq.is_controller:
         distwq.run(fun_name="main", verbose=True, spawn_workers=True, nprocs_per_worker=nprocs_per_worker)
     else:
         distwq.run(fun_name="init", module_name="example_distwq",
-                   broker_fun_name="broker_init", broker_module_name="example_distwq",
+                   enable_worker_service=True,
                    spawn_workers=True, nprocs_per_worker=nprocs_per_worker,
                    verbose=True)
