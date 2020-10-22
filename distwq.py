@@ -88,7 +88,7 @@ if has_mpi:
     rank = world_comm.rank
     is_controller = (not spawned) and (rank == 0)
     is_worker = not is_controller
-    group_comm = world_comm.Split(2 if is_controller else 1, 0)
+    group_comm = world_comm.Split(2 if is_controller else 1, rank)
     if size < 2:
         workers_available = False
         is_worker = True
@@ -770,7 +770,7 @@ class MPICollectiveWorker(object):
         
 class MPICollectiveBroker(object):        
 
-    def __init__(self, comm, group_comm, sub_comm, ready_data=None, is_worker=False, 
+    def __init__(self, comm, group_comm, sub_comm, nprocs_per_worker, ready_data=None, is_worker=False, 
                  collective_mode=CollectiveMode.Gather):
         logger.info('MPI collective broker %d starting' % rank)
         assert(not spawned)
@@ -779,7 +779,8 @@ class MPICollectiveBroker(object):
         self.group_comm = group_comm
         self.sub_comm = sub_comm
         self.worker_id = rank
-        
+        self.nprocs_per_worker = nprocs_per_worker
+
         req = self.sub_comm.Ibarrier()
         self.merged_comm = sub_comm.Merge(False)
         req.wait()
@@ -1005,7 +1006,10 @@ def run(fun_name=None, module_name='__main__',
                     req = sub_comm.Ibarrier()
                     sub_comm.bcast(args, root=MPI.ROOT)
                     req.wait()
-                broker=MPICollectiveBroker(world_comm, group_comm, sub_comm, is_worker=broker_is_worker)
+                broker=MPICollectiveBroker(world_comm, group_comm, sub_comm, 
+                                           nprocs_per_worker-1 
+                                           if broker_is_worker else nprocs_per_worker, 
+                                           is_worker=broker_is_worker)
                 if broker_is_worker and (fun is not None):
                     fun(broker, *args)
                 elif broker_fun is not None:
