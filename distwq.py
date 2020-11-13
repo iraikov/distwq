@@ -967,7 +967,8 @@ def run(fun_name=None, module_name='__main__',
     if has_mpi:  # run in mpi mode
         if is_controller:  # I'm the controller
             assert(fun is not None)
-            world_comm.barrier()
+            req = world_comm.Ibarrier()
+            req.wait()
             controller = MPIController(world_comm)
             signal.signal(signal.SIGINT, lambda signum, frame: controller.abort())
             try:  # put everything in a try block to be able to exit!
@@ -998,10 +999,11 @@ def run(fun_name=None, module_name='__main__',
                     worker_config['init_fun_name'] = str(fun_name)
                     worker_config['init_module_name'] = str(module_name)
                 arglist = ['-m', 'distwq', '-', 'distwq:spawned', json.dumps(worker_config)]
+                req = world_comm.Ibarrier()
                 sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
                                                maxprocs=nprocs_per_worker-1 
                                                if broker_is_worker else nprocs_per_worker)
-                world_comm.barrier()
+                req.wait()
                 if fun is not None:
                     req = sub_comm.Ibarrier()
                     sub_comm.bcast(args, root=MPI.ROOT)
