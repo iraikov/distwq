@@ -588,7 +588,7 @@ class MPIWorker(object):
                                    "time_over_est": this_time / time_est,
                                    "n_processed": self.n_processed[rank],
                                    "total_time": time.time() - start_time})
-                req = comm.isend((task_id, result, self.stats[-1]), dest=0, tag=MessageTag.DONE)
+                req = self.comm.isend((task_id, result, self.stats[-1]), dest=0, tag=MessageTag.DONE)
                 req.wait()
                 ready = True
             else:
@@ -965,10 +965,13 @@ def run(fun_name=None, module_name='__main__',
         broker_fun = eval(broker_fun_name, sys.modules[broker_module_name].__dict__)
 
     if has_mpi:  # run in mpi mode
+        if (n_workers > 0) and (nprocs_per_worker > 1):
+            spawn_workers = True
         if is_controller:  # I'm the controller
             assert(fun is not None)
-            req = world_comm.Ibarrier()
-            req.wait()
+            if spawn_workers:
+                req = world_comm.Ibarrier()
+                req.wait()
             controller = MPIController(world_comm)
             signal.signal(signal.SIGINT, lambda signum, frame: controller.abort())
             try:  # put everything in a try block to be able to exit!
@@ -978,8 +981,6 @@ def run(fun_name=None, module_name='__main__',
             controller.exit()
         else:  # I'm a worker or a broker
             worker_id = rank
-            if (n_workers > 0) and (nprocs_per_worker > 1):
-                spawn_workers = True
             if broker_fun is not None:
                 if spawn_workers is not True:
                     raise RuntimeError("distwq.run: cannot use broker_fun_name when spawn_workers is set to False")
