@@ -88,7 +88,14 @@ if has_mpi:
     rank = world_comm.rank
     is_controller = (not spawned) and (rank == 0)
     is_worker = not is_controller
-    group_comm = world_comm.Split(2 if is_controller else 1, rank)
+    if not spawned and (size > 1):
+        req = world_comm.Ibarrier()
+        logger.info("distwq rank %d before split" % rank)
+        group_comm = world_comm.Split(2 if is_controller else 1, rank)
+        logger.info("distwq rank %d after split" % rank)
+        req.wait()
+    else:
+        group_comm = world_comm
     if size < 2:
         workers_available = False
         is_worker = True
@@ -918,7 +925,7 @@ class MPICollectiveBroker(object):
 
 def run(fun_name=None, module_name='__main__',
         broker_fun_name=None, broker_module_name='__main__',
-        spawn_workers=False, nprocs_per_worker=1, broker_is_worker=False,
+        spawn_workers=False, sequential_spawn=True, nprocs_per_worker=1, broker_is_worker=False,
         worker_service_name="distwq.init", enable_worker_service=False,
         verbose=False, args=()):
     """
@@ -1000,11 +1007,19 @@ def run(fun_name=None, module_name='__main__',
                     worker_config['init_fun_name'] = str(fun_name)
                     worker_config['init_module_name'] = str(module_name)
                 arglist = ['-m', 'distwq', '-', 'distwq:spawned', json.dumps(worker_config)]
-                req = world_comm.Ibarrier()
+                logger.info("MPI broker %d : before spawn" % worker_id)
+                group_comm.barrier()
+                usize = MPI.COMM_WORLD.Get_attr(MPI.UNIVERSE_SIZE)
+                worker_id = rank
+                if sequential_spawn and (worker_id > 1):
+                    status = MPI.Status()
+                    data = group_comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
                 sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
                                                maxprocs=nprocs_per_worker-1 
                                                if broker_is_worker else nprocs_per_worker)
-                req.wait()
+                if sequential_spawn and (worker_id < size-1):
+                    group_comm.send("spawn", dest=worker_id)
+                logger.info("MPI broker %d : after spawn" % worker_id)
                 if fun is not None:
                     req = sub_comm.Ibarrier()
                     sub_comm.bcast(args, root=MPI.ROOT)
