@@ -89,11 +89,7 @@ if has_mpi:
     is_controller = (not spawned) and (rank == 0)
     is_worker = not is_controller
     if not spawned and (size > 1):
-        req = world_comm.Ibarrier()
-        logger.info("distwq rank %d before split" % rank)
         group_comm = world_comm.Split(2 if is_controller else 1, rank)
-        logger.info("distwq rank %d after split" % rank)
-        req.wait()
     else:
         group_comm = world_comm
     if size < 2:
@@ -976,9 +972,6 @@ def run(fun_name=None, module_name='__main__',
             spawn_workers = True
         if is_controller:  # I'm the controller
             assert(fun is not None)
-            if spawn_workers:
-                req = world_comm.Ibarrier()
-                req.wait()
             controller = MPIController(world_comm)
             signal.signal(signal.SIGINT, lambda signum, frame: controller.abort())
             try:  # put everything in a try block to be able to exit!
