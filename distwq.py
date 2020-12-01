@@ -672,7 +672,7 @@ class MPICollectiveWorker(object):
             if not self.worker_port:
                 raise RuntimeError("connect_service: unable to lookup service %s" % self.worker_service_name)
             attempt = 0
-            while attempt < n_connect_attempts:
+            while attempt < n_lookup_attempts:
                 try:
                     self.server_worker_comm = self.comm.Connect(self.worker_port, info, root=0)
                 except MPI.Exception as e:
