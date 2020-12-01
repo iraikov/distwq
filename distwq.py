@@ -919,7 +919,7 @@ class MPICollectiveBroker(object):
 
 def run(fun_name=None, module_name='__main__',
         broker_fun_name=None, broker_module_name='__main__', max_workers=-1,
-        spawn_workers=False, sequential_spawn=True, nprocs_per_worker=1, broker_is_worker=False,
+        spawn_workers=False, sequential_spawn=False, nprocs_per_worker=1, broker_is_worker=False,
         worker_service_name="distwq.init", enable_worker_service=False,
         verbose=False, args=()):
     """
@@ -966,6 +966,8 @@ def run(fun_name=None, module_name='__main__',
             group_id = 2
         elif is_worker:
             group_id = 1
+        else:
+            group_id = 3
         group_comm = world_comm.Split(group_id, rank)
     else:
         group_comm = world_comm
@@ -1025,7 +1027,7 @@ def run(fun_name=None, module_name='__main__',
                 sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
                                                maxprocs=nprocs_per_worker-1 
                                                if broker_is_worker else nprocs_per_worker)
-                if sequential_spawn and (worker_id < size-1):
+                if sequential_spawn and (worker_id < n_workers):
                     group_comm.send("spawn", dest=worker_id)
                 logger.info("MPI broker %d : after spawn" % worker_id)
                 if fun is not None:

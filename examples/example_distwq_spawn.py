@@ -70,5 +70,4 @@ if __name__ == '__main__':
     if distwq.is_controller:
         distwq.run(fun_name="main", verbose=True, spawn_workers=True, nprocs_per_worker=nprocs_per_worker)
     else:
-        distwq.run(spawn_workers=True, nprocs_per_worker=nprocs_per_worker,
-                   verbose=True)
+        distwq.run(verbose=True, spawn_workers=True, nprocs_per_worker=nprocs_per_worker)
