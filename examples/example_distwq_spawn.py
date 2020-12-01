@@ -71,6 +71,6 @@ if __name__ == '__main__':
         distwq.run(fun_name="main", verbose=True, spawn_workers=True, nprocs_per_worker=nprocs_per_worker)
     else:
         distwq.run(fun_name="init", module_name="example_distwq",
-                   broker_fun_name="broker_init", broker_module_name="example_distwq",
+                   broker_fun_name="broker_init", broker_module_name="example_distwq_spawn",
                    spawn_workers=True, nprocs_per_worker=nprocs_per_worker,
                    verbose=True)

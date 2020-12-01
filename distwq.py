@@ -88,10 +88,6 @@ if has_mpi:
     rank = world_comm.rank
     is_controller = (not spawned) and (rank == 0)
     is_worker = not is_controller
-    if not spawned and (size > 1):
-        group_comm = world_comm.Split(2 if is_controller else 1, rank)
-    else:
-        group_comm = world_comm
     if size < 2:
         workers_available = False
         is_worker = True
@@ -605,8 +601,10 @@ class MPIWorker(object):
 
 class MPICollectiveWorker(object):
 
-    def __init__(self, comm, worker_id, worker_service_name=b"distwq.init", collective_mode=CollectiveMode.Gather):
+    def __init__(self, comm, worker_id, n_workers, worker_service_name=b"distwq.init", collective_mode=CollectiveMode.Gather):
+
         self.collective_mode = collective_mode
+        self.n_workers = n_workers
         self.worker_id = worker_id
         self.comm = comm
 
@@ -684,7 +682,7 @@ class MPICollectiveWorker(object):
                         raise e
                 attempt += 1
         else:
-            for i in range(n_workers-1):
+            for i in range(self.n_workers-1):
                 client_worker_comm = self.comm.Accept(self.worker_port, info, root=0)
                 self.client_worker_comms.append(client_worker_comm)
         
@@ -920,7 +918,7 @@ class MPICollectiveBroker(object):
 
 
 def run(fun_name=None, module_name='__main__',
-        broker_fun_name=None, broker_module_name='__main__',
+        broker_fun_name=None, broker_module_name='__main__', max_workers=-1,
         spawn_workers=False, sequential_spawn=True, nprocs_per_worker=1, broker_is_worker=False,
         worker_service_name="distwq.init", enable_worker_service=False,
         verbose=False, args=()):
@@ -955,6 +953,23 @@ def run(fun_name=None, module_name='__main__',
         
     assert nprocs_per_worker > 0
     assert not spawned
+
+    global n_workers, is_worker
+    if max_workers > 0:
+        n_workers = min(max_workers, n_workers)
+        if rank > n_workers:
+            is_worker = False
+
+    if not spawned and (size > 1):
+        group_id = 0
+        if is_controller:
+            group_id = 2
+        elif is_worker:
+            group_id = 1
+        group_comm = world_comm.Split(group_id, rank)
+    else:
+        group_comm = world_comm
+
     fun = None
     if fun_name is not None:
         if module_name not in sys.modules:
@@ -979,7 +994,7 @@ def run(fun_name=None, module_name='__main__',
             except ValueError:
                 controller.abort()
             controller.exit()
-        else:  # I'm a worker or a broker
+        elif is_worker:  # I'm a worker or a broker
             worker_id = rank
             if broker_fun is not None:
                 if spawn_workers is not True:
@@ -1031,6 +1046,7 @@ def run(fun_name=None, module_name='__main__',
                 if fun is not None:
                     fun(worker, *args)
                 worker.serve()
+        world_comm.barrier()
     else:  # run as single processor
         assert(fun is not None)
         logger.info("MPI controller : not available, running as a single process.")
@@ -1052,7 +1068,7 @@ if __name__ == '__main__':
             logging.basicConfig(level=logging.WARN)
         logger.info('MPI collective worker %d-%d starting' % (worker_id, rank))
         logger.info('MPI collective worker %d-%d args: %s' % (worker_id, rank, str(my_args)))
-        worker = MPICollectiveWorker(world_comm, worker_id, worker_service_name=worker_service_name)
+        worker = MPICollectiveWorker(world_comm, worker_id, n_workers, worker_service_name=worker_service_name)
         fun = None
         if 'init_fun_name' in my_config:
             fun_name = my_config['init_fun_name']
