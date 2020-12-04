@@ -622,7 +622,6 @@ class MPICollectiveWorker(object):
         self.merged_comm = self.parent_comm.Merge(True)
         req.wait()
 
-
         self.total_time_est = np.zeros(size)*np.nan
         self.total_time_est[rank] = 0
         self.n_processed = np.zeros(size)*np.nan
@@ -717,10 +716,9 @@ class MPICollectiveWorker(object):
         while True:
             logger.info("MPI collective worker %d-%d: getting next task from queue..." % (self.worker_id, rank))
             # get next task from queue:
-            req = self.merged_comm.Ibarrier()
+            self.merged_comm.barrier()
             (name_to_call, args, kwargs, module, time_est, task_id) = \
                 self.merged_comm.scatter(None, root=0)
-            req.wait()
             logger.info("MPI collective worker %d-%d: received next task from queue." % (self.worker_id, rank))
             # TODO: add timeout and check whether controller lives!
             if name_to_call == "exit":
@@ -755,9 +753,8 @@ class MPICollectiveWorker(object):
                                "n_processed": self.n_processed[rank],
                                "total_time": time.time() - start_time})
             if self.collective_mode == CollectiveMode.Gather:
-                req = self.merged_comm.Ibarrier()
+                self.merged_comm.barrier()
                 self.merged_comm.gather((result, self.stats[-1]), root=0)
-                req.wait()
             else:
                 raise RuntimeError("MPICollectiveWorker: unknown collective mode")
                 
@@ -838,9 +835,8 @@ class MPICollectiveBroker(object):
 
             if tag == MessageTag.EXIT:
                 logger.info("MPI worker broker %d: exiting..." % self.worker_id)
-                req = self.merged_comm.Ibarrier()
+                self.merged_comm.barrier()
                 self.merged_comm.scatter([("exit", (), {}, "", 0, 0)]*merged_size, root=0)
-                req.wait()
                 self.merged_comm.Disconnect()
                 break
             elif tag == MessageTag.TASK:
@@ -849,10 +845,9 @@ class MPICollectiveBroker(object):
                 raise RuntimeError('MPI collective broker: unknown message tag')
                  
             logger.info("MPI collective broker %d: sending task %s to workers..." % (self.worker_id, str(task_id)))
-            req = self.merged_comm.Ibarrier()
+            self.merged_comm.barrier()
             self.merged_comm.scatter([(name_to_call, args, kwargs, module, time_est, task_id)]*merged_size,
                                      root=merged_rank)
-            req.wait()
             logger.info("MPI collective broker %d: sending task complete." % self.worker_id)
 
             self.total_time_est[rank] += time_est
@@ -877,9 +872,8 @@ class MPICollectiveBroker(object):
 
             logger.info("MPI collective broker %d: gathering data from workers..." % self.worker_id)
             if self.collective_mode == CollectiveMode.Gather:
-                req = self.merged_comm.Ibarrier()
+                self.merged_comm.barrier()
                 sub_data = self.merged_comm.gather((result, this_stat), root=merged_rank)
-                req.wait()
                 results = [result for result, stat in sub_data if result is not None]
                 stats = [stat for result, stat in sub_data if stat is not None]
             else:
@@ -1088,5 +1082,6 @@ if __name__ == '__main__':
             if enable_worker_service:
                 worker.connect_service(n_lookup_attempts=5)
             ret_val = fun(worker, *args)
+        worker.comm.barrier()
         worker.serve()
     
