@@ -420,6 +420,27 @@ class MPIController(object):
         else:
             return None
 
+    def probe_next_result(self):
+        """
+        Return result of next earlier submitted call whose result has not yet
+        been obtained.
+
+        Can only be called by the controller.
+
+        If no result is available, returns none.
+
+        :rtype:  object
+        :return: id, return value of call, or None of there are no results ready.
+        """
+        self.recv()
+        if len(self.result_queue) > 0:
+            task_id = self.result_queue.pop(0)
+            logger.info(f"MPI controller : returning result for call with id {task_id} "
+                        "...")
+            return task_id, self.results[task_id]
+        else:
+            return None
+
     def info(self):
         """
         Print processing statistics.
