@@ -751,7 +751,6 @@ class MPICollectiveWorker(object):
                 if self.service_published and (rank == 0):
                     MPI.Unpublish_name(self.worker_service_name, self.worker_port)
                     MPI.Close_port(self.worker_port)
-                self.merged_comm.Disconnect()
                 self.parent_comm.Disconnect()
                 break
             try:
@@ -858,7 +857,6 @@ class MPICollectiveBroker(object):
                 logger.info("MPI worker broker %d: exiting..." % self.worker_id)
                 self.merged_comm.barrier()
                 self.merged_comm.scatter([("exit", (), {}, "", 0, 0)]*merged_size, root=0)
-                self.merged_comm.Disconnect()
                 break
             elif tag == MessageTag.TASK:
                 (name_to_call, args, kwargs, module, time_est, task_id) = data
