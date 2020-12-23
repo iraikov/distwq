@@ -31,21 +31,21 @@ def init(worker):
             root=MPI.PROC_NULL
     else:
         root = 0
-    if worker.server_worker_comm is not None:
-        data = worker.server_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
-        assert (data == ['inter alltoall']*nprocs_per_worker)
-        worker.server_worker_comm.barrier()
-    else:
-        for client_worker_comm in worker.client_worker_comms:
-            data = client_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
-            assert (data == ['inter alltoall']*nprocs_per_worker)
-            client_worker_comm.barrier()
+#    if worker.server_worker_comm is not None:
+#        data = worker.server_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
+#        assert (data == ['inter alltoall']*nprocs_per_worker)
+#        worker.server_worker_comm.barrier()
+ #   else:
+#        for client_worker_comm in worker.client_worker_comms:
+#            data = client_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
+#            assert (data == ['inter alltoall']*nprocs_per_worker)
+#            client_worker_comm.barrier()
     
     
 def main(controller):
     n = 5
     for i in range(0, n):
-        controller.submit_call("do_work", (i+1,), module_name="example_distwq")
+        controller.submit_call("do_work", (i+1,), module_name="example_distwq_service")
     s = []
     for i in range(0, n):
         s.append(controller.get_next_result())

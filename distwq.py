@@ -622,7 +622,7 @@ class MPIWorker(object):
 
 class MPICollectiveWorker(object):
 
-    def __init__(self, comm, worker_id, n_workers, worker_service_name=b"distwq.init", collective_mode=CollectiveMode.Gather):
+    def __init__(self, comm, worker_id, n_workers, worker_service_name="distwq.init", collective_mode=CollectiveMode.Gather):
 
         self.collective_mode = collective_mode
         self.n_workers = n_workers
@@ -800,7 +800,7 @@ class MPICollectiveBroker(object):
         self.nprocs_per_worker = nprocs_per_worker
 
         req = self.sub_comm.Ibarrier()
-        self.merged_comm = sub_comm.Merge(False)
+        self.merged_comm = self.sub_comm.Merge(False)
         req.wait()
 
         self.total_time_est = np.zeros(size)*np.nan
@@ -1043,18 +1043,20 @@ def run(fun_name=None, module_name='__main__',
                 if sequential_spawn and (worker_id < n_workers):
                     group_comm.send("spawn", dest=worker_id)
                 logger.info("MPI broker %d : after spawn" % worker_id)
-                if fun is not None:
-                    req = sub_comm.Ibarrier()
-                    sub_comm.bcast(args, root=MPI.ROOT)
-                    req.wait()
                 broker=MPICollectiveBroker(world_comm, group_comm, sub_comm, 
                                            nprocs_per_worker-1 
                                            if broker_is_worker else nprocs_per_worker, 
                                            is_worker=broker_is_worker)
+                broker.group_comm.barrier()
+                if fun is not None:
+                    req = sub_comm.Ibarrier()
+                    sub_comm.bcast(args, root=MPI.ROOT)
+                    req.wait()
                 if broker_is_worker and (fun is not None):
                     fun(broker, *args)
                 elif broker_fun is not None:
                     broker_fun(broker, *args)
+                broker.group_comm.barrier()
                 broker.serve()
             else:
                 worker = MPIWorker(world_comm, group_comm)
@@ -1084,6 +1086,7 @@ if __name__ == '__main__':
         logger.info('MPI collective worker %d-%d starting' % (worker_id, rank))
         logger.info('MPI collective worker %d-%d args: %s' % (worker_id, rank, str(my_args)))
         worker = MPICollectiveWorker(world_comm, worker_id, n_workers, worker_service_name=worker_service_name)
+        worker.comm.barrier()
         fun = None
         if 'init_fun_name' in my_config:
             fun_name = my_config['init_fun_name']
