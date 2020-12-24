@@ -24,22 +24,15 @@ def do_work(freq):
     return f, pdens
 
 def init(worker):
-    if worker.worker_id == 1:
-        if worker.comm.rank == 0:
-            root=MPI.ROOT
-        else:
-            root=MPI.PROC_NULL
-    else:
-        root = 0
-#    if worker.server_worker_comm is not None:
-#        data = worker.server_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
-#        assert (data == ['inter alltoall']*nprocs_per_worker)
-#        worker.server_worker_comm.barrier()
- #   else:
-#        for client_worker_comm in worker.client_worker_comms:
-#            data = client_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
-#            assert (data == ['inter alltoall']*nprocs_per_worker)
-#            client_worker_comm.barrier()
+    if worker.server_worker_comm is not None:
+        data = worker.server_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
+        assert (data == ['inter alltoall']*nprocs_per_worker)
+        worker.server_worker_comm.barrier()
+   else:
+        for client_worker_comm in worker.client_worker_comms:
+            data = client_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
+            assert (data == ['inter alltoall']*nprocs_per_worker)
+            client_worker_comm.barrier()
     
     
 def main(controller):

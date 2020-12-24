@@ -31,7 +31,7 @@ available, otherwise processes calls sequentially in one process.
 #  Imports
 #
 
-import sys, signal, importlib, time, traceback, logging, random, json, uuid
+import sys, subprocess, signal, importlib, time, traceback, logging, random, json, socket
 from enum import Enum, IntEnum
 import numpy as np
 
@@ -622,13 +622,14 @@ class MPIWorker(object):
 
 class MPICollectiveWorker(object):
 
-    def __init__(self, comm, worker_id, n_workers, worker_service_name="distwq.init", collective_mode=CollectiveMode.Gather):
+    def __init__(self, comm, merged_comm, worker_id, n_workers, worker_service_name="distwq.init", collective_mode=CollectiveMode.Gather):
 
         self.collective_mode = collective_mode
         self.n_workers = n_workers
         self.worker_id = worker_id
         self.comm = comm
-
+        self.merged_comm = merged_comm
+        
         self.worker_port = None
         self.server_worker_comm = None
         self.client_worker_comms = []
@@ -636,12 +637,8 @@ class MPICollectiveWorker(object):
         self.service_published = False
         self.is_worker = True
         self.is_broker = False
+
         
-        self.parent_comm = self.comm.Get_parent()
-        assert self.parent_comm != MPI.COMM_NULL
-        req = self.parent_comm.Ibarrier()
-        self.merged_comm = self.parent_comm.Merge(True)
-        req.wait()
 
         self.total_time_est = np.zeros(size)*np.nan
         self.total_time_est[rank] = 0
@@ -727,8 +724,7 @@ class MPICollectiveWorker(object):
         run().
         """
 
-        size = self.parent_comm.size
-        rank = self.parent_comm.rank
+        rank = self.comm.rank
         merged_rank = self.merged_comm.Get_rank()
         merged_size = self.merged_comm.Get_size()
         logger.info("MPI collective worker %d-%d: waiting for calls." % (self.worker_id, rank))
@@ -751,7 +747,7 @@ class MPICollectiveWorker(object):
                 if self.service_published and (rank == 0):
                     MPI.Unpublish_name(self.worker_service_name, self.worker_port)
                     MPI.Close_port(self.worker_port)
-                self.parent_comm.Disconnect()
+                self.merged_comm.Disconnect()
                 break
             try:
                 if module not in sys.modules:
@@ -788,20 +784,16 @@ class MPICollectiveWorker(object):
         
 class MPICollectiveBroker(object):        
 
-    def __init__(self, comm, group_comm, sub_comm, nprocs_per_worker, ready_data=None, is_worker=False, 
+    def __init__(self, comm, group_comm, merged_comm, nprocs_per_worker, ready_data=None, is_worker=False, 
                  collective_mode=CollectiveMode.Gather):
         logger.info('MPI collective broker %d starting' % rank)
         assert(not spawned)
         self.collective_mode=collective_mode
         self.comm = comm
         self.group_comm = group_comm
-        self.sub_comm = sub_comm
+        self.merged_comm = merged_comm
         self.worker_id = rank
         self.nprocs_per_worker = nprocs_per_worker
-
-        req = self.sub_comm.Ibarrier()
-        self.merged_comm = self.sub_comm.Merge(False)
-        req.wait()
 
         self.total_time_est = np.zeros(size)*np.nan
         self.total_time_est[rank] = 0
@@ -932,8 +924,8 @@ class MPICollectiveBroker(object):
 
 def run(fun_name=None, module_name='__main__',
         broker_fun_name=None, broker_module_name='__main__', max_workers=-1,
-        spawn_workers=False, sequential_spawn=False, nprocs_per_worker=1, broker_is_worker=False,
-        worker_service_name="distwq.init", enable_worker_service=False,
+        spawn_workers=False, sequential_spawn=False, nprocs_per_worker=1,
+        broker_is_worker=False, worker_service_name="distwq.init", enable_worker_service=False,
         verbose=False, args=()):
     """
     Run in controller/worker mode until fun(controller/worker) finishes.
@@ -948,7 +940,8 @@ def run(fun_name=None, module_name='__main__',
 
     :arg string module_name: module where fun_name is located
     :arg bool verbose: whether processing information should be printed.
-    :arg bool spawn_workers: whether to spawn separate worker processes via MPI_Spawn
+    :arg bool spawn_workers: whether to spawn separate worker processes via MPI_Comm_spawn
+    :arg bool sequential_spawn: whether to spawn processes in sequence
     :arg int nprocs_per_worker: how many processes per worker
     :arg broker_is_worker: when spawn_worker is True or nprocs_per_worker > 1, MPI_Spawn will be used to create workers, 
     and a CollectiveBroker object is used to relay tasks and results between controller and worker.
@@ -1043,14 +1036,17 @@ def run(fun_name=None, module_name='__main__',
                 if sequential_spawn and (worker_id < n_workers):
                     group_comm.send("spawn", dest=worker_id)
                 logger.info("MPI broker %d : after spawn" % worker_id)
-                broker=MPICollectiveBroker(world_comm, group_comm, sub_comm, 
+                req = sub_comm.Ibarrier()
+                merged_comm = sub_comm.Merge(False)
+                req.wait()
+                broker=MPICollectiveBroker(world_comm, group_comm, merged_comm, 
                                            nprocs_per_worker-1 
                                            if broker_is_worker else nprocs_per_worker, 
                                            is_worker=broker_is_worker)
                 broker.group_comm.barrier()
                 if fun is not None:
-                    req = sub_comm.Ibarrier()
-                    sub_comm.bcast(args, root=MPI.ROOT)
+                    req = merged_comm.Ibarrier()
+                    merged_comm.bcast(args, root=0)
                     req.wait()
                 if broker_is_worker and (fun is not None):
                     fun(broker, *args)
@@ -1085,7 +1081,20 @@ if __name__ == '__main__':
             logging.basicConfig(level=logging.WARN)
         logger.info('MPI collective worker %d-%d starting' % (worker_id, rank))
         logger.info('MPI collective worker %d-%d args: %s' % (worker_id, rank, str(my_args)))
-        worker = MPICollectiveWorker(world_comm, worker_id, n_workers, worker_service_name=worker_service_name)
+
+        parent_comm = world_comm.Get_parent()
+        if parent_comm == MPI.COMM_NULL:
+             client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+             # TODO: obtain address
+             client.connect(address)
+             fd = client.fileno()
+             parent_comm = MPI.Comm.Join(fd)
+             client.close()
+        req = parent_comm.Ibarrier()
+        merged_comm = parent_comm.Merge(True)
+        req.wait()
+        
+        worker = MPICollectiveWorker(world_comm, merged_comm, worker_id, n_workers, worker_service_name=worker_service_name)
         worker.comm.barrier()
         fun = None
         if 'init_fun_name' in my_config:
@@ -1095,15 +1104,14 @@ if __name__ == '__main__':
                 importlib.import_module(module)
             fun = eval(fun_name, sys.modules[module].__dict__)
         if fun is not None:
-            parent_comm = MPI.Comm.Get_parent()
             if enable_worker_service and (worker_id == 1):
                 worker.publish_service()
-            req = parent_comm.Ibarrier()
-            args = parent_comm.bcast(None, root=0)
+            req = merged_comm.Ibarrier()
+            args = merged_comm.bcast(None, root=0)
             req.wait()
             if enable_worker_service:
                 worker.connect_service(n_lookup_attempts=5)
             ret_val = fun(worker, *args)
         worker.comm.barrier()
         worker.serve()
-    
+        MPI.Finalize()

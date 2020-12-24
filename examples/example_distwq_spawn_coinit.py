@@ -1,7 +1,7 @@
 # Example of using distributed work queue distwq
 # PYTHONPATH must include the directories in which distwq and this file are located.
 
-import pprint
+import pprint, sys
 import distwq
 import numpy as np  
 import scipy
@@ -24,22 +24,27 @@ def do_work(freq):
     return f, pdens
 
 def init(worker):
+    sys.stdout.flush()
     if worker.worker_id == 1:
-        req = worker.parent_comm.isend("inter send", dest=0)
+        req = worker.merged_comm.isend("inter send", dest=0)
         req.wait()
     else:
-        req = worker.parent_comm.Ibarrier()
-        data = worker.parent_comm.bcast(None, root=0)
+        req = worker.merged_comm.Ibarrier()
+        data = worker.merged_comm.bcast(None, root=0)
         print("worker %d / rank %d: data = %s" % (worker.worker_id, worker.comm.rank, str(data)))
+        sys.stdout.flush()
         req.wait()
-    worker.comm.barrier()
+
         
 def broker_init(broker):
     
     data = None
+    sys.stdout.flush()
     if broker.worker_id == 1:
         status = MPI.Status()
-        data = broker.sub_comm.recv(source=0, tag=MPI.ANY_TAG, status=status)
+        data = broker.merged_comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
+        print("broker %d: received data = %s" % (broker.worker_id, str(data)))
+        sys.stdout.flush()
         tag = status.Get_tag()
 
     if broker.worker_id == 1:
@@ -48,10 +53,11 @@ def broker_init(broker):
         data = broker.group_comm.bcast(None, root=0)
     broker.group_comm.barrier()
     print("broker %d: data = %s" % (broker.worker_id, str(data)))
+    sys.stdout.flush()
 
     if broker.worker_id != 1:
-        req = broker.sub_comm.Ibarrier()
-        broker.sub_comm.bcast(data, root=MPI.ROOT)
+        req = broker.merged_comm.Ibarrier()
+        broker.merged_comm.bcast(data, root=0)
         req.wait()
     broker.group_comm.barrier()
     
