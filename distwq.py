@@ -37,6 +37,7 @@ import numpy as np
 
 class CollectiveMode(IntEnum):
     Gather = 1
+    SendRecv = 2
 
 class MessageTag(IntEnum):
     READY = 0
@@ -771,6 +772,9 @@ class MPICollectiveWorker(object):
             if self.collective_mode == CollectiveMode.Gather:
                 self.merged_comm.barrier()
                 self.merged_comm.gather((result, self.stats[-1]), root=0)
+            elif self.collective_mode == CollectiveMode.SendRecv:
+                req = self.merged_comm.isend((result, self.stats[-1]), dest=0, tag=MessageTag.DONE)
+                req.wait()
             else:
                 raise RuntimeError("MPICollectiveWorker: unknown collective mode")
                 
@@ -887,6 +891,21 @@ class MPICollectiveBroker(object):
                 sub_data = self.merged_comm.gather((result, this_stat), root=merged_rank)
                 results = [result for result, stat in sub_data if result is not None]
                 stats = [stat for result, stat in sub_data if stat is not None]
+            elif self.collective_mode == CollectiveMode.SendRecv:
+                reqs = []
+                for i in range(self.nprocs_per_worker):
+                    buf = bytearray(1<<20) # TODO: 1 MB buffer, make it configurable
+                    req = self.merged_comm.irecv(buf, source=i if self.is_worker else i+1, tag=MessageTag.DONE)
+                    reqs.append(req)
+                status = [MPI.Status() for i in range(self.nprocs_per_worker)]
+                try:
+                    sub_data = MPI.Request.waitall(reqs, status)
+                except:
+                    print([MPI.Get_error_string(s.Get_error()) for s in status])
+                    raise
+                del(reqs)
+                results = [result for result, stat in sub_data if result is not None]
+                stats = [stat for result, stat in sub_data if stat is not None]
             else:
                 raise RuntimeError('MPICollectiveBroker: unknown collective mode')
             logger.info("MPI collective broker %d: gathered %s results from workers..." % (self.worker_id, len(results)))
@@ -924,7 +943,7 @@ class MPICollectiveBroker(object):
 
 def run(fun_name=None, module_name='__main__',
         broker_fun_name=None, broker_module_name='__main__', max_workers=-1,
-        spawn_workers=False, sequential_spawn=False, nprocs_per_worker=1,
+        spawn_workers=False, sequential_spawn=False, nprocs_per_worker=1, collective_mode="gather",
         broker_is_worker=False, worker_service_name="distwq.init", enable_worker_service=False,
         verbose=False, args=()):
     """
@@ -1016,6 +1035,7 @@ def run(fun_name=None, module_name='__main__',
             if spawn_workers:
                 worker_config = { 'worker_id': worker_id,
                                   'n_workers': n_workers,
+                                  'collective_mode': collective_mode,
                                   'enable_worker_service': enable_worker_service,
                                   'worker_service_name': worker_service_name,
                                   'verbose': verbose }
@@ -1027,6 +1047,13 @@ def run(fun_name=None, module_name='__main__',
                 group_comm.barrier()
                 usize = MPI.COMM_WORLD.Get_attr(MPI.UNIVERSE_SIZE)
                 worker_id = rank
+                if collective_mode.lower() == "gather":
+                    collective_mode_arg = CollectiveMode.Gather
+                elif collective_mode.lower() == "sendrecv":
+                    collective_mode_arg = CollectiveMode.SendRecv
+                else:
+                    raise RuntimeError("Unknown collective mode %s" % str(collective_mode))
+                    
                 if sequential_spawn and (worker_id > 1):
                     status = MPI.Status()
                     data = group_comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
@@ -1040,9 +1067,9 @@ def run(fun_name=None, module_name='__main__',
                 merged_comm = sub_comm.Merge(False)
                 req.wait()
                 broker=MPICollectiveBroker(world_comm, group_comm, merged_comm, 
-                                           nprocs_per_worker-1 
-                                           if broker_is_worker else nprocs_per_worker, 
-                                           is_worker=broker_is_worker)
+                                           nprocs_per_worker,
+                                           is_worker=broker_is_worker,
+                                           collective_mode=collective_mode_arg)
                 broker.group_comm.barrier()
                 if fun is not None:
                     req = merged_comm.Ibarrier()
@@ -1071,6 +1098,7 @@ def run(fun_name=None, module_name='__main__',
 if __name__ == '__main__':
     if is_worker:
         worker_id = int(my_config['worker_id'])
+        collective_mode = my_config['collective_mode']
         enable_worker_service = my_config['enable_worker_service']
         worker_service_name = my_config['worker_service_name']
         verbose_flag = my_config['verbose']
@@ -1083,18 +1111,20 @@ if __name__ == '__main__':
         logger.info('MPI collective worker %d-%d args: %s' % (worker_id, rank, str(my_args)))
 
         parent_comm = world_comm.Get_parent()
-        if parent_comm == MPI.COMM_NULL:
-             client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-             # TODO: obtain address
-             client.connect(address)
-             fd = client.fileno()
-             parent_comm = MPI.Comm.Join(fd)
-             client.close()
         req = parent_comm.Ibarrier()
         merged_comm = parent_comm.Merge(True)
         req.wait()
+
+        if collective_mode.lower() == "gather":
+            collective_mode_arg = CollectiveMode.Gather
+        elif collective_mode.lower() == "sendrecv":
+            collective_mode_arg = CollectiveMode.SendRecv
+        else:
+            raise RuntimeError("Unknown collective mode %s" % str(collective_mode))
         
-        worker = MPICollectiveWorker(world_comm, merged_comm, worker_id, n_workers, worker_service_name=worker_service_name)
+        worker = MPICollectiveWorker(world_comm, merged_comm, worker_id, n_workers,  
+                                     collective_mode=collective_mode_arg,
+                                     worker_service_name=worker_service_name)
         worker.comm.barrier()
         fun = None
         if 'init_fun_name' in my_config:
