@@ -734,9 +734,10 @@ class MPICollectiveWorker(object):
         while True:
             logger.info("MPI collective worker %d-%d: getting next task from queue..." % (self.worker_id, rank))
             # get next task from queue:
-            self.merged_comm.barrier()
+            req = self.merged_comm.Ibarrier()
             (name_to_call, args, kwargs, module, time_est, task_id) = \
                 self.merged_comm.scatter(None, root=0)
+            req.wait()
             logger.info("MPI collective worker %d-%d: received next task from queue." % (self.worker_id, rank))
             # TODO: add timeout and check whether controller lives!
             if name_to_call == "exit":
@@ -770,8 +771,9 @@ class MPICollectiveWorker(object):
                                "n_processed": self.n_processed[rank],
                                "total_time": time.time() - start_time})
             if self.collective_mode == CollectiveMode.Gather:
-                self.merged_comm.barrier()
+                req = self.merged_comm.Ibarrier()
                 self.merged_comm.gather((result, self.stats[-1]), root=0)
+                req.wait()
             elif self.collective_mode == CollectiveMode.SendRecv:
                 req = self.merged_comm.isend((result, self.stats[-1]), dest=0, tag=MessageTag.DONE)
                 req.wait()
@@ -851,8 +853,9 @@ class MPICollectiveBroker(object):
 
             if tag == MessageTag.EXIT:
                 logger.info("MPI worker broker %d: exiting..." % self.worker_id)
-                self.merged_comm.barrier()
+                req = self.merged_comm.Ibarrier()
                 self.merged_comm.scatter([("exit", (), {}, "", 0, 0)]*merged_size, root=0)
+                req.wait()
                 break
             elif tag == MessageTag.TASK:
                 (name_to_call, args, kwargs, module, time_est, task_id) = data
@@ -860,9 +863,10 @@ class MPICollectiveBroker(object):
                 raise RuntimeError('MPI collective broker: unknown message tag')
                  
             logger.info("MPI collective broker %d: sending task %s to workers..." % (self.worker_id, str(task_id)))
-            self.merged_comm.barrier()
+            req = self.merged_comm.Ibarrier()
             self.merged_comm.scatter([(name_to_call, args, kwargs, module, time_est, task_id)]*merged_size,
                                      root=merged_rank)
+            req.wait()
             logger.info("MPI collective broker %d: sending task complete." % self.worker_id)
 
             self.total_time_est[rank] += time_est
@@ -887,8 +891,9 @@ class MPICollectiveBroker(object):
 
             logger.info("MPI collective broker %d: gathering data from workers..." % self.worker_id)
             if self.collective_mode == CollectiveMode.Gather:
-                self.merged_comm.barrier()
+                req = self.merged_comm.Ibarrier()
                 sub_data = self.merged_comm.gather((result, this_stat), root=merged_rank)
+                req.wait()
                 results = [result for result, stat in sub_data if result is not None]
                 stats = [stat for result, stat in sub_data if stat is not None]
             elif self.collective_mode == CollectiveMode.SendRecv:
@@ -1044,7 +1049,6 @@ def run(fun_name=None, module_name='__main__',
                     worker_config['init_module_name'] = str(module_name)
                 arglist = ['-m', 'distwq', '-', 'distwq:spawned', json.dumps(worker_config)]
                 logger.info("MPI broker %d : before spawn" % worker_id)
-                group_comm.barrier()
                 usize = MPI.COMM_WORLD.Get_attr(MPI.UNIVERSE_SIZE)
                 worker_id = rank
                 if collective_mode.lower() == "gather":
@@ -1070,7 +1074,6 @@ def run(fun_name=None, module_name='__main__',
                                            nprocs_per_worker,
                                            is_worker=broker_is_worker,
                                            collective_mode=collective_mode_arg)
-                broker.group_comm.barrier()
                 if fun is not None:
                     req = merged_comm.Ibarrier()
                     merged_comm.bcast(args, root=0)
@@ -1079,14 +1082,12 @@ def run(fun_name=None, module_name='__main__',
                     fun(broker, *args)
                 elif broker_fun is not None:
                     broker_fun(broker, *args)
-                broker.group_comm.barrier()
                 broker.serve()
             else:
                 worker = MPIWorker(world_comm, group_comm)
                 if fun is not None:
                     fun(worker, *args)
                 worker.serve()
-        world_comm.barrier()
     else:  # run as single processor
         assert(fun is not None)
         logger.info("MPI controller : not available, running as a single process.")
@@ -1125,7 +1126,6 @@ if __name__ == '__main__':
         worker = MPICollectiveWorker(world_comm, merged_comm, worker_id, n_workers,  
                                      collective_mode=collective_mode_arg,
                                      worker_service_name=worker_service_name)
-        worker.comm.barrier()
         fun = None
         if 'init_fun_name' in my_config:
             fun_name = my_config['init_fun_name']
@@ -1142,6 +1142,5 @@ if __name__ == '__main__':
             if enable_worker_service:
                 worker.connect_service(n_lookup_attempts=5)
             ret_val = fun(worker, *args)
-        worker.comm.barrier()
         worker.serve()
         MPI.Finalize()
