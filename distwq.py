@@ -651,7 +651,7 @@ class MPICollectiveWorker(object):
 
     def publish_service(self):
         if not self.service_published:
-            if rank == 0:
+            if self.comm.rank == 0:
                 try:
                     found = MPI.Lookup_name(self.worker_service_name)
                     if found:
@@ -671,7 +671,7 @@ class MPICollectiveWorker(object):
     def connect_service(self, n_lookup_attempts=5):
         info = MPI.INFO_NULL
         if not self.service_published:
-            if rank == 0:
+            if self.comm.rank == 0:
                 attempt = 0
                 while attempt < n_lookup_attempts:
                     try:
@@ -689,16 +689,7 @@ class MPICollectiveWorker(object):
             self.comm.barrier()
             if not self.worker_port:
                 raise RuntimeError("connect_service: unable to lookup service %s" % self.worker_service_name)
-            attempt = 0
-            while attempt < n_lookup_attempts:
-                try:
-                    self.server_worker_comm = self.comm.Connect(self.worker_port, info, root=0)
-                except MPI.Exception as e:
-                    if e.Get_error_class() == MPI.ERR_PORT:
-                        time.sleep(1)
-                    else:
-                        raise e
-                attempt += 1
+            self.server_worker_comm = self.comm.Connect(self.worker_port, info, root=0)
         else:
             for i in range(self.n_workers-1):
                 client_worker_comm = self.comm.Accept(self.worker_port, info, root=0)

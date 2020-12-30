@@ -1,7 +1,7 @@
 # Example of using distributed work queue distwq
 # PYTHONPATH must include the directories in which distwq and this file are located.
 
-import pprint
+import sys, pprint
 import distwq
 import numpy as np  
 import scipy
@@ -28,11 +28,13 @@ def init(worker):
         data = worker.server_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
         assert (data == ['inter alltoall']*nprocs_per_worker)
         worker.server_worker_comm.barrier()
-   else:
+    else:
         for client_worker_comm in worker.client_worker_comms:
             data = client_worker_comm.alltoall(['inter alltoall']*nprocs_per_worker)
             assert (data == ['inter alltoall']*nprocs_per_worker)
             client_worker_comm.barrier()
+    print(f"worker init: data = {data}")
+    sys.stdout.flush()
     
     
 def main(controller):
@@ -50,7 +52,7 @@ if __name__ == '__main__':
     if distwq.is_controller:
         distwq.run(fun_name="main", verbose=True, spawn_workers=True, nprocs_per_worker=nprocs_per_worker)
     else:
-        distwq.run(fun_name="init", module_name="example_distwq",
-                   enable_worker_service=True,
-                   spawn_workers=True, nprocs_per_worker=nprocs_per_worker,
+        distwq.run(fun_name="init", module_name="example_distwq_service", 
+                   enable_worker_service=True, 
+                   spawn_workers=True, nprocs_per_worker=nprocs_per_worker, 
                    verbose=True)
