@@ -436,7 +436,7 @@ class MPIController(object):
         self.recv()
         if len(self.result_queue) > 0:
             task_id = self.result_queue.pop(0)
-            logger.info(f"MPI controller : returning result for call with id {task_id} "
+            logger.info(f"MPI controller : received result for call with id {task_id} "
                         "...")
             return task_id, self.results[task_id]
         else:
