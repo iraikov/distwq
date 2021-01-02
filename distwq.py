@@ -182,17 +182,19 @@ class MPIController(object):
         """
         if not self.workers_available:
             return
-        if self.comm.Iprobe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG):
+        while self.comm.Iprobe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG):
 
             status = MPI.Status()
             data = self.comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
             worker = status.Get_source()
             tag = status.Get_tag()
-            if tag == MessageTag.READY:
-                self.ready_workers.append(worker)
-                self.ready_workers_data[worker] = data
-                self.active_workers.add(worker)
-            elif tag == MessageTag.DONE:
+            if tag == MessageTag.READY.value:
+                if worker not in self.ready_workers:
+                    self.ready_workers.append(worker)
+                    self.ready_workers_data[worker] = data
+                    self.active_workers.add(worker)
+                logger.info(f"MPI controller : received READY message from worker {worker}")
+            elif tag == MessageTag.DONE.value:
                 task_id, results, stats = data
                 self.results[task_id] = results
                 self.stats.append(stats)
@@ -202,6 +204,7 @@ class MPIController(object):
                 self.result_queue.append(task_id)
                 self.worker_queue[worker].remove(task_id)
                 self.assigned.pop(task_id)
+                logger.info(f"MPI controller : received DONE message for task {task_id}")
             else:
                 raise RuntimeError(f"MPI controller : invalid message tag {tag}")
         else:
@@ -303,7 +306,7 @@ class MPIController(object):
                     logger.info(f"MPI controller : assigning call with id {task_id} to worker "
                                     f"{worker}: {name_to_call} {args} {kwargs} ...")
                     req = self.comm.isend((name_to_call, args, kwargs, module_name, time_est, task_id),
-                                          dest=worker, tag=MessageTag.TASK)
+                                          dest=worker, tag=MessageTag.TASK.value)
                     req.wait()
                     self.ready_workers.remove(worker)
                     del(self.ready_workers_data[worker])
@@ -315,8 +318,8 @@ class MPIController(object):
         else:
             # perform call on this rank if no workers are available:
             worker = 0
-            logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} "
-                        "...")
+            logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} ...")
+
             try:
                 if module_name not in sys.modules:
                     importlib.import_module(module_name)
@@ -412,6 +415,7 @@ class MPIController(object):
         :return: id, return value of call, or None of there are no more calls in
                  the queue.
         """
+        self.recv()
         if len(self.result_queue) > 0:
             task_id = self.result_queue.pop(0)
             return task_id, self.results[task_id]
@@ -436,8 +440,7 @@ class MPIController(object):
         self.recv()
         if len(self.result_queue) > 0:
             task_id = self.result_queue.pop(0)
-            logger.info(f"MPI controller : received result for call with id {task_id} "
-                        "...")
+            logger.info(f"MPI controller : received result for call with id {task_id} ...")
             return task_id, self.results[task_id]
         else:
             return None
@@ -516,7 +519,7 @@ class MPIController(object):
             for worker in self.active_workers:
                 logger.info(f"MPI controller : telling worker {worker} "
                             "to exit...")
-                reqs.append(self.comm.isend(None, dest=worker, tag=MessageTag.EXIT))
+                reqs.append(self.comm.isend(None, dest=worker, tag=MessageTag.EXIT.value))
             MPI.Request.Waitall(reqs)
                 
     def abort(self):
@@ -573,7 +576,7 @@ class MPIWorker(object):
         while not exit_flag:
             # signal the controller this worker is ready
             if ready:
-                req = self.comm.isend(self.ready_data, dest=0, tag=MessageTag.READY)
+                req = self.comm.isend(self.ready_data, dest=0, tag=MessageTag.READY.value)
                 req.wait()
             
             # get next task from queue:
@@ -583,11 +586,11 @@ class MPIWorker(object):
                 
                 # TODO: add timeout and check whether controller lives!
                 object_to_call = None
-                if tag == MessageTag.EXIT:
+                if tag == MessageTag.EXIT.value:
                     logger.info("MPI worker %d: exiting..." % self.worker_id)
                     exit_flag = True
                     break
-                elif tag == MessageTag.TASK:
+                elif tag == MessageTag.TASK.value:
                     try:
                         (name_to_call, args, kwargs, module, time_est, task_id) = data
                         if module not in sys.modules:
@@ -609,7 +612,7 @@ class MPIWorker(object):
                                    "time_over_est": this_time / time_est,
                                    "n_processed": self.n_processed[rank],
                                    "total_time": time.time() - start_time})
-                req = self.comm.isend((task_id, result, self.stats[-1]), dest=0, tag=MessageTag.DONE)
+                req = self.comm.isend((task_id, result, self.stats[-1]), dest=0, tag=MessageTag.DONE.value)
                 req.wait()
                 ready = True
             else:
@@ -725,10 +728,17 @@ class MPICollectiveWorker(object):
         while True:
             logger.info("MPI collective worker %d-%d: getting next task from queue..." % (self.worker_id, rank))
             # get next task from queue:
-            req = self.merged_comm.Ibarrier()
-            (name_to_call, args, kwargs, module, time_est, task_id) = \
-                self.merged_comm.scatter(None, root=0)
-            req.wait()
+            if self.collective_mode == CollectiveMode.Gather:
+                req = self.merged_comm.Ibarrier()
+                (name_to_call, args, kwargs, module, time_est, task_id) = \
+                    self.merged_comm.scatter(None, root=0)
+                req.wait()
+            elif self.collective_mode == CollectiveMode.SendRecv:
+                buf = bytearray(1<<20) # TODO: 1 MB buffer, make it configurable
+                req = self.merged_comm.irecv(buf, source=0, tag=MessageTag.TASK.value)
+                (name_to_call, args, kwargs, module, time_est, task_id) = req.wait()
+            else:
+                raise RuntimeError("Unknown collective mode %s" % str(collective_mode))
             logger.info("MPI collective worker %d-%d: received next task from queue." % (self.worker_id, rank))
             # TODO: add timeout and check whether controller lives!
             if name_to_call == "exit":
@@ -766,7 +776,7 @@ class MPICollectiveWorker(object):
                 self.merged_comm.gather((result, self.stats[-1]), root=0)
                 req.wait()
             elif self.collective_mode == CollectiveMode.SendRecv:
-                req = self.merged_comm.isend((result, self.stats[-1]), dest=0, tag=MessageTag.DONE)
+                req = self.merged_comm.isend((result, self.stats[-1]), dest=0, tag=MessageTag.DONE.value)
                 req.wait()
             else:
                 raise RuntimeError("MPICollectiveWorker: unknown collective mode")
@@ -824,15 +834,15 @@ class MPICollectiveBroker(object):
         rank = self.comm.rank
         merged_rank = self.merged_comm.Get_rank()
         merged_size = self.merged_comm.Get_size()
-
+        
         logger.info("MPI worker broker %d: waiting for calls." % self.worker_id)
             
         # wait for orders:
         while True:
-            # signal the controller this worker is ready
-            req = self.comm.isend(self.ready_data, dest=0, tag=MessageTag.READY)
-            req.wait()
             logger.info("MPI collective broker %d: getting next task from controller..." % self.worker_id)
+            # signal the controller this worker is ready
+            req = self.comm.isend(self.ready_data, dest=0, tag=MessageTag.READY.value)
+            req.wait()
 
             while True:
                 msg = self.recv()
@@ -842,22 +852,44 @@ class MPICollectiveBroker(object):
 
             logger.info("MPI collective broker %d: received message from controller..." % self.worker_id)
 
-            if tag == MessageTag.EXIT:
+            if tag == MessageTag.EXIT.value:
                 logger.info("MPI worker broker %d: exiting..." % self.worker_id)
-                req = self.merged_comm.Ibarrier()
-                self.merged_comm.scatter([("exit", (), {}, "", 0, 0)]*merged_size, root=0)
-                req.wait()
+                msg = ("exit", (), {}, "", 0, 0)
+                if self.collective_mode == CollectiveMode.Gather:
+                    req = self.merged_comm.Ibarrier()
+                    self.merged_comm.scatter([msg]*merged_size, root=0)
+                    req.wait()
+                elif self.collective_mode == CollectiveMode.SendRecv:
+                    reqs = []
+                    for i in range(self.nprocs_per_worker):
+                        req = self.merged_comm.isend(msg, dest=i if self.is_worker else i+1, tag=MessageTag.TASK.value)                    
+                        reqs.append(req)
+                    MPI.Request.waitall(reqs)
+                else:
+                    raise RuntimeError('MPICollectiveBroker: unknown collective mode')
+                
                 break
-            elif tag == MessageTag.TASK:
+            elif tag == MessageTag.TASK.value:
                 (name_to_call, args, kwargs, module, time_est, task_id) = data
             else:
                 raise RuntimeError('MPI collective broker: unknown message tag')
                  
             logger.info("MPI collective broker %d: sending task %s to workers..." % (self.worker_id, str(task_id)))
-            req = self.merged_comm.Ibarrier()
-            self.merged_comm.scatter([(name_to_call, args, kwargs, module, time_est, task_id)]*merged_size,
-                                     root=merged_rank)
-            req.wait()
+            if self.collective_mode == CollectiveMode.Gather:
+                req = self.merged_comm.Ibarrier()
+                self.merged_comm.scatter([(name_to_call, args, kwargs, module, time_est, task_id)]*merged_size,
+                                         root=merged_rank)
+                req.wait()
+            elif self.collective_mode == CollectiveMode.SendRecv:
+                msg = (name_to_call, args, kwargs, module, time_est, task_id)
+                reqs = []
+                for i in range(self.nprocs_per_worker):
+                    req = self.merged_comm.isend(msg, dest=i if self.is_worker else i+1, tag=MessageTag.TASK.value)                    
+                    reqs.append(req)
+                MPI.Request.waitall(reqs)
+            else:
+                raise RuntimeError('MPICollectiveBroker: unknown collective mode')
+                
             logger.info("MPI collective broker %d: sending task complete." % self.worker_id)
 
             self.total_time_est[rank] += time_est
@@ -891,7 +923,7 @@ class MPICollectiveBroker(object):
                 reqs = []
                 for i in range(self.nprocs_per_worker):
                     buf = bytearray(1<<20) # TODO: 1 MB buffer, make it configurable
-                    req = self.merged_comm.irecv(buf, source=i if self.is_worker else i+1, tag=MessageTag.DONE)
+                    req = self.merged_comm.irecv(buf, source=i if self.is_worker else i+1, tag=MessageTag.DONE.value)
                     reqs.append(req)
                 status = [MPI.Status() for i in range(self.nprocs_per_worker)]
                 try:
@@ -912,8 +944,9 @@ class MPICollectiveBroker(object):
                 stat = stats[max_time]
             else:
                 stat = None
+            ready = True
             logger.info("MPI collective broker %d: sending results to controller..." % self.worker_id)
-            req = self.comm.isend((task_id, results, stat), dest=0, tag=MessageTag.DONE)
+            req = self.comm.isend((task_id, results, stat), dest=0, tag=MessageTag.DONE.value)
             req.wait()
 
     def recv(self):
