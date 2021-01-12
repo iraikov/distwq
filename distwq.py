@@ -861,10 +861,12 @@ class MPICollectiveBroker(object):
                     req.wait()
                 elif self.collective_mode == CollectiveMode.SendRecv:
                     reqs = []
+                    status = []
                     for i in range(self.nprocs_per_worker):
                         req = self.merged_comm.isend(msg, dest=i if self.is_worker else i+1, tag=MessageTag.TASK.value)                    
                         reqs.append(req)
-                    MPI.Request.waitall(reqs)
+                        status.append(MPI.Status())
+                    MPI.Request.waitall(reqs, status)
                 else:
                     raise RuntimeError('MPICollectiveBroker: unknown collective mode')
                 
@@ -883,10 +885,12 @@ class MPICollectiveBroker(object):
             elif self.collective_mode == CollectiveMode.SendRecv:
                 msg = (name_to_call, args, kwargs, module, time_est, task_id)
                 reqs = []
+                status = [] 
                 for i in range(self.nprocs_per_worker):
                     req = self.merged_comm.isend(msg, dest=i if self.is_worker else i+1, tag=MessageTag.TASK.value)                    
                     reqs.append(req)
-                MPI.Request.waitall(reqs)
+                    status.append(MPI.Status())
+                MPI.Request.waitall(reqs, status)
             else:
                 raise RuntimeError('MPICollectiveBroker: unknown collective mode')
                 
