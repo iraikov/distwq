@@ -31,7 +31,7 @@ available, otherwise processes calls sequentially in one process.
 #  Imports
 #
 
-import sys, subprocess, signal, importlib, time, traceback, logging, random, json, socket
+import sys, time, signal, importlib, traceback, logging, random, json
 from enum import Enum, IntEnum
 import numpy as np
 
@@ -895,11 +895,21 @@ class MPICollectiveBroker(object):
                 raise RuntimeError('MPICollectiveBroker: unknown collective mode')
                 
             logger.info("MPI collective broker %d: sending task complete." % self.worker_id)
-
+            
             self.total_time_est[rank] += time_est
             if self.is_worker:
+
+                try:
+                    if module not in sys.modules:
+                        importlib.import_module(module)
+                        object_to_call = eval(name_to_call,
+                                              sys.modules[module].__dict__)
+                except NameError:
+                    logger.error(str(sys.modules[module].__dict__.keys()))
+                    raise
+
                 call_time = time.time()
-                result = object_to_call(*args, **kwargs)
+                this_result = object_to_call(*args, **kwargs)
                 this_time = time.time() - call_time
                 self.n_processed[rank] += 1
                 this_stat = {"id": task_id,
@@ -909,17 +919,15 @@ class MPICollectiveBroker(object):
                              "n_processed": self.n_processed[rank],
                              "total_time": time.time() - start_time}
             else:
-                result = None
+                this_result = None
                 this_stat = None
                 this_time = 0
                 
-            if this_stat is not None:
-                self.stats.append(this_stat)
 
             logger.info("MPI collective broker %d: gathering data from workers..." % self.worker_id)
             if self.collective_mode == CollectiveMode.Gather:
                 req = self.merged_comm.Ibarrier()
-                sub_data = self.merged_comm.gather((result, this_stat), root=merged_rank)
+                sub_data = self.merged_comm.gather((this_result, this_stat), root=merged_rank)
                 req.wait()
                 results = [result for result, stat in sub_data if result is not None]
                 stats = [stat for result, stat in sub_data if stat is not None]
@@ -938,9 +946,13 @@ class MPICollectiveBroker(object):
                 del(reqs)
                 results = [result for result, stat in sub_data if result is not None]
                 stats = [stat for result, stat in sub_data if stat is not None]
+                if this_result is not None:
+                    results = [this_result] + results
+                    stats = [this_stat] + stats
             else:
                 raise RuntimeError('MPICollectiveBroker: unknown collective mode')
             logger.info("MPI collective broker %d: gathered %s results from workers..." % (self.worker_id, len(results)))
+
             stat_times = np.asarray([stat["this_time"] for stat in stats])
             max_time = 0.
             if len(stat_times) > 0:
@@ -963,8 +975,6 @@ class MPICollectiveBroker(object):
         else:
             time.sleep(1)
             return None
-            
-
 
     def abort(self):
         rank = self.comm.rank

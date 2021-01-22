@@ -34,32 +34,12 @@ def init(worker):
         req.wait()
     worker.comm.barrier()
         
-def broker_init(broker):
-    
-    data = None
-    if broker.worker_id == 1:
-        status = MPI.Status()
-        data = broker.merged_comm.recv(source=0, tag=MPI.ANY_TAG, status=status)
-        tag = status.Get_tag()
-
-    if broker.worker_id == 1:
-        broker.group_comm.bcast(data, root=0)
-    else:
-        data = broker.group_comm.bcast(None, root=0)
-    broker.group_comm.barrier()
-    print("broker %d: data = %s" % (broker.worker_id, str(data)))
-
-    if broker.worker_id != 1:
-        req = broker.merged_comm.Ibarrier()
-        broker.merged_comm.bcast(data, root=0)
-        req.wait()
-    broker.group_comm.barrier()
     
 def main(controller):
     
     n = 5
     for i in range(0, n):
-        controller.submit_call("do_work", (i+1,), module_name="example_distwq_spawn")
+        controller.submit_call("do_work", (i+1,), module_name="example_distwq_spawn_broker_is_worker")
     s = []
     for i in range(0, n):
         s.append(controller.get_next_result())
@@ -68,6 +48,6 @@ def main(controller):
 
 if __name__ == '__main__':
     if distwq.is_controller:
-        distwq.run(fun_name="main", verbose=True, spawn_workers=True, nprocs_per_worker=nprocs_per_worker)
+        distwq.run(fun_name="main", verbose=True, spawn_workers=True, broker_is_worker=True, nprocs_per_worker=nprocs_per_worker)
     else:
-        distwq.run(verbose=True, spawn_workers=True, nprocs_per_worker=nprocs_per_worker)
+        distwq.run(verbose=True, spawn_workers=True, broker_is_worker=True, nprocs_per_worker=nprocs_per_worker)
