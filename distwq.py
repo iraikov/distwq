@@ -1059,6 +1059,8 @@ def run(fun_name=None, module_name='__main__',
             assert(fun is not None)
             controller = MPIController(world_comm)
             signal.signal(signal.SIGINT, lambda signum, frame: controller.abort())
+            req = world_comm.Ibarrier()
+            req.wait()
             try:  # put everything in a try block to be able to exit!
                 fun(controller, *args)
             except ValueError:
@@ -1087,7 +1089,6 @@ def run(fun_name=None, module_name='__main__',
                     worker_config['init_module_name'] = str(module_name)
                 arglist = ['-m', 'distwq', '-', 'distwq:spawned', json.dumps(worker_config)]
                 logger.info("MPI broker %d : before spawn" % worker_id)
-                usize = MPI.COMM_WORLD.Get_attr(MPI.UNIVERSE_SIZE)
                 worker_id = rank
                 if collective_mode.lower() == "gather":
                     collective_mode_arg = CollectiveMode.Gather
@@ -1099,12 +1100,19 @@ def run(fun_name=None, module_name='__main__',
                 if sequential_spawn and (worker_id > 1):
                     status = MPI.Status()
                     data = group_comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
-                sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
-                                               maxprocs=nprocs_per_worker-1 
-                                               if broker_is_worker else nprocs_per_worker)
+                time.sleep(random.randrange(1,30))
+                req = world_comm.Ibarrier()
+                try:
+                    sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
+                                                   maxprocs=nprocs_per_worker-1 
+                                                   if broker_is_worker else nprocs_per_worker)
+                except:
+                    logger.error("MPI broker %d : spawn error" % worker_id)
+                    raise
                 if sequential_spawn and (worker_id < n_workers):
                     group_comm.send("spawn", dest=worker_id)
                 logger.info("MPI broker %d : after spawn" % worker_id)
+                req.wait()
                 req = sub_comm.Ibarrier()
                 merged_comm = sub_comm.Merge(False)
                 req.wait()
@@ -1137,6 +1145,7 @@ def run(fun_name=None, module_name='__main__',
 if __name__ == '__main__':
     if is_worker:
         worker_id = int(my_config['worker_id'])
+        logger.info('MPI collective worker %d-%d starting' % (worker_id, rank))
         collective_mode = my_config['collective_mode']
         enable_worker_service = my_config['enable_worker_service']
         worker_service_name = my_config['worker_service_name']
