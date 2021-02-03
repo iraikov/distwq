@@ -452,11 +452,16 @@ class MPIController(object):
         Can only be called by the controller.
         """
 
+        if len(self.stats) == 0:
+            return
+
         call_times = np.array([s["this_time"] for s in self.stats])
         call_quotients = np.array([s["time_over_est"] for s in self.stats])
+        cvar_call_quotients = call_quotients.std()/call_quotients.mean()
 
         if self.workers_available:
-            worker_quotients = self.total_time/self.total_time_est
+            worker_quotients = self.total_time/self.total_time_est 
+            cvar_worker_quotients = worker_quotients.std()/worker_quotients.mean()
             print("\n"
                   "MPI run statistics\n"
                   "     =====================\n"
@@ -471,7 +476,7 @@ class MPIController(object):
                   "     std.dev. of time per call: "
                   f"{call_times.std()}\n"
                   "     coeff. of var. of actual over estd. time per call: "
-                  f"{call_quotients.std()/call_quotients.mean()}\n"
+                  f"{cvar_call_quotients}\n"
                   "     workers:                      "
                   f"{n_workers}\n"
                   "     mean calls per worker:        "
@@ -487,7 +492,7 @@ class MPIController(object):
                   "     std.dev. of time per worker: "
                   f"{self.total_time.std()}\n"
                   "     coeff. of var. of actual over estd. time per worker: "
-                  f"{worker_quotients.std()/worker_quotients.mean()}\n")
+                  f"{cvar_worker_quotients}\n")
         else:
             print("\n"
                   "MPI run statistics\n"
@@ -503,7 +508,7 @@ class MPIController(object):
                   "     std.dev. of time per call: "
                   f"{call_times.std()}\n"
                   "     coeff. of var. of actual over estd. time per call: "
-                  f"{call_quotients.std()/call_quotients.mean()}\n")
+                  f"{cvar_call_quotients}\n")
 
     def exit(self):
         """
