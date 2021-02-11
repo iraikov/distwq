@@ -1157,6 +1157,8 @@ def run(fun_name=None, module_name='__main__',
                     broker_fun(broker, *args)
                 broker.serve()
             else:
+                req = world_comm.Ibarrier()
+                req.wait()
                 worker = MPIWorker(world_comm, group_comm)
                 if fun is not None:
                     fun(worker, *args)
