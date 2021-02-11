@@ -445,6 +445,28 @@ class MPIController(object):
         else:
             return None
 
+    def probe_all_next_results(self):
+        """
+        Return all available results of earlier submitted calls whose result has not yet
+        been obtained.
+
+        Can only be called by the controller.
+
+        If no result is available, returns empty list.
+
+        :rtype:  object
+        :return: list of id, return value of call
+        """
+        self.recv()
+        ret = []
+        if len(self.result_queue) > 0:
+            for i in range(len(self.result_queue)):
+                task_id = self.result_queue.pop(0)
+                logger.info(f"MPI controller : received result for call with id {task_id} ...")
+                ret.append((task_id, self.results[task_id]))
+
+        return ret
+
     def info(self):
         """
         Print processing statistics.
