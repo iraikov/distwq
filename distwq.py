@@ -2,7 +2,7 @@
 #
 # Distributed work queue operations using mpi4py.
 #
-# Copyright (C) 2020 Ivan Raikov and distwq authors.
+# Copyright (C) 2020-2021 Ivan Raikov and distwq authors.
 # 
 # Based on mpi.py from the pyunicorn project.
 # Copyright (C) 2008--2019 Jonathan F. Donges and pyunicorn authors
@@ -1013,7 +1013,8 @@ class MPICollectiveBroker(object):
 
 def run(fun_name=None, module_name='__main__',
         broker_fun_name=None, broker_module_name='__main__', max_workers=-1,
-        spawn_workers=False, sequential_spawn=False, nprocs_per_worker=1, collective_mode="gather",
+        spawn_workers=False, sequential_spawn=False, spawn_startup_wait=None,
+        nprocs_per_worker=1, collective_mode="gather",
         broker_is_worker=False, worker_service_name="distwq.init", enable_worker_service=False,
         verbose=False, args=()):
     """
@@ -1127,7 +1128,9 @@ def run(fun_name=None, module_name='__main__',
                 if sequential_spawn and (worker_id > 1):
                     status = MPI.Status()
                     data = group_comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
-                time.sleep(random.randrange(1,30))
+                if spawn_startup_wait is not None:
+                    spawn_startup_wait = max(spawn_startup_wait, 2)
+                    time.sleep(random.randrange(1, spawn_startup_wait))
                 req = world_comm.Ibarrier()
                 try:
                     sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
