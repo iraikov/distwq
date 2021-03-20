@@ -68,6 +68,6 @@ def main(controller):
 
 if __name__ == '__main__':
     if distwq.is_controller:
-        distwq.run(fun_name="main", verbose=True, spawn_workers=True, nprocs_per_worker=nprocs_per_worker)
+        distwq.run(fun_name="main", verbose=True, spawn_workers=True, nprocs_per_worker=nprocs_per_worker, spawn_startup_wait=3)
     else:
-        distwq.run(verbose=True, spawn_workers=True, nprocs_per_worker=nprocs_per_worker)
+        distwq.run(verbose=True, spawn_workers=True, nprocs_per_worker=nprocs_per_worker, spawn_startup_wait=3)
