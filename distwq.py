@@ -176,14 +176,18 @@ class MPIController(object):
         - "total_time": total wall time until this call was finished
         """
 
-    def recv(self):
+    def recv(self, limit=1000):
         """
         Process incoming messages.
         """
         if not self.workers_available:
             return
+        count = 0
         while self.comm.Iprobe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG):
 
+            if (limit is not None) and (limit < count):
+                break
+                
             status = MPI.Status()
             data = self.comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
             worker = status.Get_source()
@@ -204,6 +208,7 @@ class MPIController(object):
                 self.result_queue.append(task_id)
                 self.worker_queue[worker].remove(task_id)
                 self.assigned.pop(task_id)
+                count += 1
                 logger.info(f"MPI controller : received DONE message for task {task_id}")
             else:
                 raise RuntimeError(f"MPI controller : invalid message tag {tag}")
