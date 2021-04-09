@@ -758,7 +758,8 @@ class MPICollectiveWorker(object):
 
         # wait for orders:
         while True:
-            logger.info("MPI collective worker %d-%d: getting next task from queue..." % (self.worker_id, rank))
+            if rank == 0:
+                logger.info("MPI collective worker %d-%d: getting next task from queue..." % (self.worker_id, rank))
             # get next task from queue:
             if self.collective_mode == CollectiveMode.Gather:
                 req = self.merged_comm.Ibarrier()
@@ -771,7 +772,8 @@ class MPICollectiveWorker(object):
                 (name_to_call, args, kwargs, module, time_est, task_id) = req.wait()
             else:
                 raise RuntimeError("Unknown collective mode %s" % str(collective_mode))
-            logger.info("MPI collective worker %d-%d: received next task from queue." % (self.worker_id, rank))
+            if rank == 0:
+                logger.info("MPI collective worker %d-%d: received next task from queue." % (self.worker_id, rank))
             # TODO: add timeout and check whether controller lives!
             if name_to_call == "exit":
                 logger.info("MPI collective worker %d-%d: exiting..." % (self.worker_id, rank))
