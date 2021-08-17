@@ -69,10 +69,6 @@ def mpi_excepthook(type, value, traceback):
     sys.stderr.flush()
     MPI.COMM_WORLD.Abort(1)
 
-if has_mpi:
-    sys_excepthook = sys.excepthook
-    sys.excepthook = mpi_excepthook
-
 my_args = sys.argv[sys.argv.index('-')+1:] if '-' in sys.argv else None
 my_config = None
 
@@ -98,6 +94,11 @@ else:
     is_controller = True
     is_worker = True
 
+if has_mpi and (size > 1):
+    sys_excepthook = sys.excepthook
+    sys.excepthook = mpi_excepthook
+
+    
 if spawned:    
     my_config = json.loads(my_args[1])
     
