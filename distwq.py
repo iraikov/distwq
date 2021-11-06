@@ -520,7 +520,7 @@ class MPIController(object):
                   "     std.dev. of time per worker: "
                   f"{self.total_time.std():.04f}\n"
                   "     coeff. of var. of actual over estd. time per worker: "
-                  f"{cvar_worker_quotients}\n")
+                  f"{cvar_worker_quotients:.04f}\n")
         else:
             print("\n"
                   "MPI run statistics\n"
