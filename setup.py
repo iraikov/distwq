@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="distwq", 
-    version="0.1.0",
+    version="0.1.1",
     author="Ivan Raikov",
     author_email="ivan.g.raikov@gmail.com",
     description="Distributed work queue operations using mpi4py.",
