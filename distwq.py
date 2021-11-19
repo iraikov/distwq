@@ -493,7 +493,7 @@ class MPIController(object):
             cvar_worker_quotients = worker_quotients.std()/worker_quotients.mean()
             print("\n"
                   "MPI run statistics\n"
-                  "     =====================\n"
+                  "==========================\n"
                   "     results collected:         "
                   f"{self.n_processed[1:].sum()}\n"
                   "     results not yet collected: "
@@ -525,7 +525,7 @@ class MPIController(object):
         else:
             print("\n"
                   "MPI run statistics\n"
-                  "     =====================\n"
+                  "==========================\n"
                   "     results collected:         "
                   f"{self.n_processed[0]}\n"
                   "     results not yet collected: "
