@@ -2,7 +2,7 @@
 #
 # Distributed work queue operations using mpi4py.
 #
-# Copyright (C) 2020-2021 Ivan Raikov and distwq authors.
+# Copyright (C) 2020-2022 Ivan Raikov and distwq authors.
 # 
 # Based on mpi.py from the pyunicorn project.
 # Copyright (C) 2008--2019 Jonathan F. Donges and pyunicorn authors
@@ -492,7 +492,7 @@ class MPIController(object):
             worker_quotients = self.total_time/self.total_time_est 
             cvar_worker_quotients = worker_quotients.std()/worker_quotients.mean()
             print("\n"
-                  "MPI run statistics\n"
+                  "distwq run statistics\n"
                   "==========================\n"
                   "     results collected:         "
                   f"{self.n_processed[1:].sum()}\n"
@@ -524,7 +524,7 @@ class MPIController(object):
                   f"{cvar_worker_quotients:.04f}\n")
         else:
             print("\n"
-                  "MPI run statistics\n"
+                  "distwq run statistics\n"
                   "==========================\n"
                   "     results collected:         "
                   f"{self.n_processed[0]}\n"
@@ -1027,6 +1027,7 @@ class MPICollectiveBroker(object):
 def run(fun_name=None, module_name='__main__',
         broker_fun_name=None, broker_module_name='__main__', max_workers=-1,
         spawn_workers=False, sequential_spawn=False, spawn_startup_wait=None,
+        spawn_executable=None, spawn_args=[],
         nprocs_per_worker=1, collective_mode="gather",
         broker_is_worker=False, worker_service_name="distwq.init", enable_worker_service=False,
         time_limit=None, verbose=False, args=()):
@@ -1045,6 +1046,8 @@ def run(fun_name=None, module_name='__main__',
     :arg bool verbose: whether processing information should be printed.
     :arg bool spawn_workers: whether to spawn separate worker processes via MPI_Comm_spawn
     :arg bool sequential_spawn: whether to spawn processes in sequence
+    :arg string spawn_executable: optional executable name for call to spawn (default is sys.executable)
+    :arg string list spawn_args: optional arguments to prepend to list of arguments in call to spawn; or a callable that takes the list of arguments that distwq needs to pass to the python interpreter, and returns a new list of arguments
     :arg int nprocs_per_worker: how many processes per worker
     :arg broker_is_worker: when spawn_worker is True or nprocs_per_worker > 1, MPI_Spawn will be used to create workers, 
     and a CollectiveBroker object is used to relay tasks and results between controller and worker.
@@ -1129,7 +1132,10 @@ def run(fun_name=None, module_name='__main__',
                 if fun is not None:
                     worker_config['init_fun_name'] = str(fun_name)
                     worker_config['init_module_name'] = str(module_name)
-                arglist = ['-m', 'distwq', '-', 'distwq:spawned', json.dumps(worker_config)]
+                if callable(spawn_args):
+                    arglist = spawn_args(['-m', 'distwq', '-', 'distwq:spawned', json.dumps(worker_config)])
+                else:
+                    arglist = spawn_args + ['-m', 'distwq', '-', 'distwq:spawned', json.dumps(worker_config)]
                 logger.info(f"MPI broker {worker_id} : before spawn")
                 worker_id = rank
                 if collective_mode.lower() == "gather":
@@ -1147,7 +1153,9 @@ def run(fun_name=None, module_name='__main__',
                     time.sleep(random.randrange(1, spawn_startup_wait))
                 req = world_comm.Ibarrier()
                 try:
-                    sub_comm = MPI.COMM_SELF.Spawn(sys.executable, args=arglist,
+                    if spawn_executable is None:
+                        spawn_executable = sys.executable
+                    sub_comm = MPI.COMM_SELF.Spawn(spawn_executable, args=arglist,
                                                    maxprocs=nprocs_per_worker-1 
                                                    if broker_is_worker else nprocs_per_worker)
                 except:
