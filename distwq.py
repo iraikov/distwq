@@ -1132,10 +1132,11 @@ def run(fun_name=None, module_name='__main__',
                 if fun is not None:
                     worker_config['init_fun_name'] = str(fun_name)
                     worker_config['init_module_name'] = str(module_name)
+                spawn_stmts = f"import sys, runpy; sys.argv.extend(['-', 'distwq:spawned', '{json.dumps(worker_config)}']); runpy.run_module('distwq', run_name='__main__'); sys.exit()"
                 if callable(spawn_args):
-                    arglist = spawn_args(['-m', 'distwq', '-', 'distwq:spawned', json.dumps(worker_config)])
+                    arglist = spawn_args(['-c', spawn_stmts])
                 else:
-                    arglist = spawn_args + ['-m', 'distwq', '-', 'distwq:spawned', json.dumps(worker_config)]
+                    arglist = spawn_args + ['-c', spawn_stmts]
                 logger.info(f"MPI broker {worker_id} : before spawn")
                 worker_id = rank
                 if collective_mode.lower() == "gather":
@@ -1195,7 +1196,6 @@ def run(fun_name=None, module_name='__main__',
         fun(controller, *args)
         logger.info("MPI controller : finished.")
 
-        
 if __name__ == '__main__':
     if is_worker:
         worker_id = int(my_config['worker_id'])
