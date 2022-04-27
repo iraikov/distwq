@@ -516,6 +516,7 @@ class MPIController(object):
         """
         if len(kwargs) > 0:
             assert(len(args) == len(kwargs))
+        submitted_task_ids = []
         if self.workers_available:
             self.process()
             N = len(args)
@@ -532,9 +533,10 @@ class MPIController(object):
                     raise RuntimeError(f"task id {task_id} already in queue!")
                 if this_task_id in self.waiting:
                     raise RuntimeError(f"task id {task_id} already in wait queue!")
-                self.queue_call(name_to_call, args=this_args, kwargs=this_kwargs,
-                                module_name=module_name, time_est=time_est,
-                                task_id=this_task_id, requested_worker=this_worker)
+                this_task_id = self.queue_call(name_to_call, args=this_args, kwargs=this_kwargs,
+                                               module_name=module_name, time_est=time_est,
+                                               task_id=this_task_id, requested_worker=this_worker)
+                submitted_task_ids.append(this_task_id)
         else:
             # perform call on this rank if no workers are available:
             worker = 0
@@ -548,20 +550,30 @@ class MPIController(object):
             except NameError:
                 logger.error(str(sys.modules[module_name].__dict__.keys()))
                 raise
-            call_time = time.time()
-            self.results[task_id] = object_to_call(*args, **kwargs)
-            self.result_queue.append(task_id)
-            this_time = time.time() - call_time
-            self.n_processed[0] += 1
-            self.total_time[0] = time.time() - start_time
-            self.stats.append({"id":task_id, "rank": worker,
-                               "this_time": this_time,
-                               "time_over_est": this_time / time_est,
-                               "n_processed": self.n_processed[0],
-                               "total_time": self.total_time[0]})
-            self.total_time_est[worker] += time_est
+            if (args is None) or (len(args) == 0):
+                kwargs = [dict() for _ in range(N)]
+            if (kwargs is None) or (len(kwargs) == 0):
+                kwargs = [dict() for _ in range(N)]
+            if task_ids is None:
+                task_ids = [None for _ in range(N)]
+            if workers is None:
+                workers = [None for _ in range(N)]
+            for this_args, this_kwargs, this_task_id, this_worker in zip(args, kwargs, task_ids, workers):
+                call_time = time.time()
+                self.results[this_task_id] = object_to_call(*this_args, **this_kwargs)
+                self.result_queue.append(task_id)
+                this_time = time.time() - call_time
+                self.n_processed[0] += 1
+                self.total_time[0] = time.time() - start_time
+                self.stats.append({"id":task_id, "rank": worker,
+                                   "this_time": this_time,
+                                   "time_over_est": this_time / time_est,
+                                   "n_processed": self.n_processed[0],
+                                   "total_time": self.total_time[0]})
+                self.total_time_est[this_worker] += time_est
+                subitted_task_ids.append(this_task_id)
 
-        return task_ids
+        return submitted_task_ids
 
 
     
