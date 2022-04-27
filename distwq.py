@@ -407,7 +407,6 @@ class MPIController(object):
         if task_id in self.waiting:
             raise RuntimeError(f"task id {task_id} already in wait queue!")
         if self.workers_available:
-            self.process()
             self.wait_queue.append(task_id)
             self.waiting[task_id] = (name_to_call, args, kwargs, module_name, time_est, requested_worker)
         else:
