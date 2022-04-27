@@ -330,7 +330,7 @@ class MPIController(object):
             else:
                 self.queue_call(name_to_call, args=args, kwargs=kwargs,
                                 module_name=module_name, time_est=time_est,
-                                task_id=task_id, worker=worker)
+                                task_id=task_id, requested_worker=worker)
                 
         else:
             # perform call on this rank if no workers are available:
@@ -361,7 +361,7 @@ class MPIController(object):
         return task_id
     
     def queue_call(self, name_to_call, args=(), kwargs={},
-                    module_name="__main__", time_est=1, task_id=None):
+                    module_name="__main__", time_est=1, task_id=None, requested_worker=None):
         """Submit a call for later execution.
 
         If called by the controller and workers are available, the
@@ -392,6 +392,11 @@ class MPIController(object):
             If None, a random id is assigned and returned. Can be re-used after
             get_result() for this is. Default: None
         :return object: id of call, to be used in get_result().
+        :type requested_worker: int > 0 and < comm.size, or None
+        :arg  requested_worker: optional no. of worker to assign the call to. 
+            If None, or the worker is not available, the call is assigned to 
+            the worker with the smallest current total time estimate. 
+            Default: None
 
         """
         if task_id is None:
@@ -404,7 +409,7 @@ class MPIController(object):
         if self.workers_available:
             self.process()
             self.wait_queue.append(task_id)
-            self.waiting[task_id] = (name_to_call, args, kwargs, module_name, time_est)
+            self.waiting[task_id] = (name_to_call, args, kwargs, module_name, time_est, worker)
         else:
             # perform call on this rank if no workers are available:
             worker = 0
@@ -442,11 +447,16 @@ class MPIController(object):
         if self.workers_available:
             if (len(self.waiting) > 0) and len(self.ready_workers) > 0:
                 for i in range(len(self.ready_workers)):
-                    ready_total_time_est = np.asarray([self.total_time_est[worker] for worker in self.ready_workers])
-                    worker = self.ready_workers[np.argmin(ready_total_time_est)]
-
+                    if len(self.waiting) == 0:
+                        break
                     task_id = self.wait_queue.pop(0)
-                    name_to_call, args, kwargs, module_name, time_est = self.waiting[task_id]
+                    name_to_call, args, kwargs, module_name, time_est, requested_worker = self.waiting[task_id]
+                    if (requested_worker is None) or (requested_worker not in self.ready_workers):
+                        ready_total_time_est = np.asarray([self.total_time_est[worker] for worker in self.ready_workers])
+                        worker = self.ready_workers[np.argmin(ready_total_time_est)]
+                    else:
+                        worker = requested_worker
+
                     # send name to call, args, time_est to worker:
                     logger.info(f"MPI controller : assigning waiting call with id {task_id} to worker "
                                 f"{worker}: {name_to_call} {args} {kwargs} ...")
@@ -519,7 +529,7 @@ class MPIController(object):
                     raise RuntimeError(f"task id {task_id} already in wait queue!")
                 self.queue_call(name_to_call, args=this_args, kwargs=this_kwargs,
                                 module_name=module_name, time_est=time_est,
-                                task_id=task_id, worker=worker)
+                                task_id=task_id, requested_worker=worker)
                 
         else:
             # perform call on this rank if no workers are available:
