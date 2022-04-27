@@ -409,7 +409,7 @@ class MPIController(object):
         if self.workers_available:
             self.process()
             self.wait_queue.append(task_id)
-            self.waiting[task_id] = (name_to_call, args, kwargs, module_name, time_est, worker)
+            self.waiting[task_id] = (name_to_call, args, kwargs, module_name, time_est, requested_worker)
         else:
             # perform call on this rank if no workers are available:
             worker = 0
@@ -446,6 +446,8 @@ class MPIController(object):
         task_ids = []
         if self.workers_available:
             if (len(self.waiting) > 0) and len(self.ready_workers) > 0:
+                reqs = []
+                status = []
                 for i in range(len(self.ready_workers)):
                     if len(self.waiting) == 0:
                         break
@@ -462,7 +464,8 @@ class MPIController(object):
                                 f"{worker}: {name_to_call} {args} {kwargs} ...")
                     req = self.comm.isend((name_to_call, args, kwargs, module_name, time_est, task_id),
                                           dest=worker, tag=MessageTag.TASK.value)
-                    req.wait()
+                    reqs.append(req)
+                    status.append(MPI.Status())
                     self.ready_workers.remove(worker)
                     del(self.ready_workers_data[worker])
                     self.task_queue.append(task_id)
@@ -471,7 +474,7 @@ class MPIController(object):
                     del(self.waiting[task_id])
                     self.total_time_est[worker] += time_est
                     task_ids.append(task_id)
-                    
+                MPI.Request.waitall(reqs, status) 
         return task_ids
 
     
@@ -516,12 +519,14 @@ class MPIController(object):
         if self.workers_available:
             self.process()
             N = len(args)
+            if (args is None) or (len(args) == 0):
+                kwargs = [dict() for _ in range(N)]
             if (kwargs is None) or (len(kwargs) == 0):
                 kwargs = [dict() for _ in range(N)]
             if task_ids is None:
                 task_ids = [None for _ in range(N)]
             if workers is None:
-                task_ids = [None for _ in range(N)]
+                workers = [None for _ in range(N)]
             for this_args, this_kwargs, this_task_id, this_worker in zip(args, kwargs, task_ids, workers):
                 if this_task_id in self.assigned:
                     raise RuntimeError(f"task id {task_id} already in queue!")
@@ -529,8 +534,7 @@ class MPIController(object):
                     raise RuntimeError(f"task id {task_id} already in wait queue!")
                 self.queue_call(name_to_call, args=this_args, kwargs=this_kwargs,
                                 module_name=module_name, time_est=time_est,
-                                task_id=task_id, requested_worker=worker)
-                
+                                task_id=this_task_id, requested_worker=this_worker)
         else:
             # perform call on this rank if no workers are available:
             worker = 0
@@ -555,9 +559,9 @@ class MPIController(object):
                                "time_over_est": this_time / time_est,
                                "n_processed": self.n_processed[0],
                                "total_time": self.total_time[0]})
+            self.total_time_est[worker] += time_est
 
-        self.total_time_est[worker] += time_est
-        return task_id
+        return task_ids
 
 
     
