@@ -516,9 +516,9 @@ class MPIController(object):
         if len(kwargs) > 0:
             assert(len(args) == len(kwargs))
         submitted_task_ids = []
+        N = len(args)
         if self.workers_available:
             self.process()
-            N = len(args)
             if (args is None) or (len(args) == 0):
                 kwargs = [dict() for _ in range(N)]
             if (kwargs is None) or (len(kwargs) == 0):
@@ -560,17 +560,17 @@ class MPIController(object):
             for this_args, this_kwargs, this_task_id, this_worker in zip(args, kwargs, task_ids, workers):
                 call_time = time.time()
                 self.results[this_task_id] = object_to_call(*this_args, **this_kwargs)
-                self.result_queue.append(task_id)
+                self.result_queue.append(this_task_id)
                 this_time = time.time() - call_time
                 self.n_processed[0] += 1
                 self.total_time[0] = time.time() - start_time
-                self.stats.append({"id":task_id, "rank": worker,
+                self.stats.append({"id": this_task_id, "rank": worker,
                                    "this_time": this_time,
                                    "time_over_est": this_time / time_est,
                                    "n_processed": self.n_processed[0],
                                    "total_time": self.total_time[0]})
                 self.total_time_est[this_worker] += time_est
-                subitted_task_ids.append(this_task_id)
+                submitted_task_ids.append(this_task_id)
 
         return submitted_task_ids
 
