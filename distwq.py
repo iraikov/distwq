@@ -129,6 +129,8 @@ class MPIController(object):
         self.total_time_est[0] = np.inf
         self.result_queue = []
         self.task_queue = []
+        self.wait_queue = []
+        self.waiting = {}
         self.ready_workers = []
         self.ready_workers_data = {}
         """(list) ids of submitted calls"""
@@ -179,7 +181,7 @@ class MPIController(object):
         - "total_time": total wall time until this call was finished
         """
 
-    def recv(self, limit=1000):
+    def process(self, limit=1000):
         """
         Process incoming messages.
         """
@@ -217,7 +219,10 @@ class MPIController(object):
                 raise RuntimeError(f"MPI controller : invalid message tag {tag}")
         else:
             time.sleep(1)
-        
+
+        return self.submit_waiting()
+
+            
     def submit_call(self, name_to_call, args=(), kwargs={},
                     module_name="__main__", time_est=1, task_id=None, worker=None):
         """
@@ -299,30 +304,34 @@ class MPIController(object):
             self.count += 1
         if task_id in self.assigned:
             raise RuntimeError(f"task id {task_id} already in queue!")
+        if task_id in self.waiting:
+            raise RuntimeError(f"task id {task_id} already in wait queue!")
         if self.workers_available:
-            while True:
-                self.recv()
-                if len(self.ready_workers) > 0:
-                    if worker is None:
-                        ready_total_time_est = np.asarray([self.total_time_est[worker] for worker in self.ready_workers])
-                        worker = self.ready_workers[np.argmin(ready_total_time_est)]
-                    else:
-                        if worker not in self.ready_workers:
-                            raise RuntimeError(f"worker {worker} is not in ready queue!")
+            self.process()
+            if len(self.ready_workers) > 0:
+                if worker is None:
+                    ready_total_time_est = np.asarray([self.total_time_est[worker] for worker in self.ready_workers])
+                    worker = self.ready_workers[np.argmin(ready_total_time_est)]
+                else:
+                    if worker not in self.ready_workers:
+                        raise RuntimeError(f"worker {worker} is not in ready queue!")
 
-                    # send name to call, args, time_est to worker:
-                    logger.info(f"MPI controller : assigning call with id {task_id} to worker "
-                                    f"{worker}: {name_to_call} {args} {kwargs} ...")
-                    req = self.comm.isend((name_to_call, args, kwargs, module_name, time_est, task_id),
-                                          dest=worker, tag=MessageTag.TASK.value)
-                    req.wait()
-                    self.ready_workers.remove(worker)
-                    del(self.ready_workers_data[worker])
-                    break
-            self.task_queue.append(task_id)
-            self.worker_queue[worker].append(task_id)
-            self.assigned[task_id] = worker
-
+                # send name to call, args, time_est to worker:
+                logger.info(f"MPI controller : assigning call with id {task_id} to worker "
+                            f"{worker}: {name_to_call} {args} {kwargs} ...")
+                req = self.comm.isend((name_to_call, args, kwargs, module_name, time_est, task_id),
+                                      dest=worker, tag=MessageTag.TASK.value)
+                req.wait()
+                self.ready_workers.remove(worker)
+                del(self.ready_workers_data[worker])
+                self.task_queue.append(task_id)
+                self.worker_queue[worker].append(task_id)
+                self.assigned[task_id] = worker
+            else:
+                self.queue_call(name_to_call, args=args, kwargs=kwargs,
+                                module_name=module_name, time_est=time_est,
+                                task_id=task_id, requested_worker=worker)
+                
         else:
             # perform call on this rank if no workers are available:
             worker = 0
@@ -350,14 +359,230 @@ class MPIController(object):
 
         self.total_time_est[worker] += time_est
         return task_id
+    
+    def queue_call(self, name_to_call, args=(), kwargs={},
+                    module_name="__main__", time_est=1, task_id=None, requested_worker=None):
+        """Submit a call for later execution.
 
+        If called by the controller and workers are available, the
+        call is put on the wait queue and submitted to a worker when
+        it is available. Method process() checks the wait queue and
+        submits calls on the wait queue.
+
+        If called by a worker or if no workers are available, the call is instead
+        executed synchronously on this MPI node.
+
+        :arg str name_to_call: name of callable object (usually a function or
+            static method of a class) as contained in the namespace specified
+            by module.
+        :arg tuple args: the positional arguments to provide to the callable
+            object.  Tuples of length 1 must be written (arg,).  Default: ()
+        :arg dict kwargs: the keyword arguments to provide to the callable
+            object.  Default: {}
+        :arg str module: optional name of the imported module or submodule in
+            whose namespace the callable object is contained. For objects
+            defined on the script level, this is "__main__", for objects
+            defined in an imported package, this is the package name. Must be a
+            key of the dictionary sys.modules (check there after import if in
+            doubt).  Default: "__main__"
+        :arg float time_est: estimated relative completion time for this call;
+            used to find a suitable worker. Default: 1
+        :type id: object or None
+        :arg  id: unique id for this call. Must be a possible dictionary key.
+            If None, a random id is assigned and returned. Can be re-used after
+            get_result() for this is. Default: None
+        :return object: id of call, to be used in get_result().
+        :type requested_worker: int > 0 and < comm.size, or None
+        :arg  requested_worker: optional no. of worker to assign the call to. 
+            If None, or the worker is not available, the call is assigned to 
+            the worker with the smallest current total time estimate. 
+            Default: None
+
+        """
+        if task_id is None:
+            task_id = self.count
+            self.count += 1
+        if task_id in self.assigned:
+            raise RuntimeError(f"task id {task_id} already in queue!")
+        if task_id in self.waiting:
+            raise RuntimeError(f"task id {task_id} already in wait queue!")
+        if self.workers_available:
+            self.wait_queue.append(task_id)
+            self.waiting[task_id] = (name_to_call, args, kwargs, module_name, time_est, requested_worker)
+        else:
+            # perform call on this rank if no workers are available:
+            worker = 0
+            logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} ...")
+
+            try:
+                if module_name not in sys.modules:
+                    importlib.import_module(module_name)
+                object_to_call = eval(name_to_call,
+                                      sys.modules[module_name].__dict__)
+            except NameError:
+                logger.error(str(sys.modules[module_name].__dict__.keys()))
+                raise
+            call_time = time.time()
+            self.results[task_id] = object_to_call(*args, **kwargs)
+            self.result_queue.append(task_id)
+            this_time = time.time() - call_time
+            self.n_processed[0] += 1
+            self.total_time[0] = time.time() - start_time
+            self.stats.append({"id":task_id, "rank": worker,
+                               "this_time": this_time,
+                               "time_over_est": this_time / time_est,
+                               "n_processed": self.n_processed[0],
+                               "total_time": self.total_time[0]})
+
+        return task_id
+
+    def submit_waiting(self):
+        """
+        Submit waiting tasks if workers are available.
+        
+        :return object: ids of calls, to be used in get_result().
+        """
+        task_ids = []
+        if self.workers_available:
+            if (len(self.waiting) > 0) and len(self.ready_workers) > 0:
+                reqs = []
+                status = []
+                for i in range(len(self.ready_workers)):
+                    if len(self.waiting) == 0:
+                        break
+                    task_id = self.wait_queue.pop(0)
+                    name_to_call, args, kwargs, module_name, time_est, requested_worker = self.waiting[task_id]
+                    if (requested_worker is None) or (requested_worker not in self.ready_workers):
+                        ready_total_time_est = np.asarray([self.total_time_est[worker] for worker in self.ready_workers])
+                        worker = self.ready_workers[np.argmin(ready_total_time_est)]
+                    else:
+                        worker = requested_worker
+
+                    # send name to call, args, time_est to worker:
+                    logger.info(f"MPI controller : assigning waiting call with id {task_id} to worker "
+                                f"{worker}: {name_to_call} {args} {kwargs} ...")
+                    req = self.comm.isend((name_to_call, args, kwargs, module_name, time_est, task_id),
+                                          dest=worker, tag=MessageTag.TASK.value)
+                    reqs.append(req)
+                    status.append(MPI.Status())
+                    self.ready_workers.remove(worker)
+                    del(self.ready_workers_data[worker])
+                    self.task_queue.append(task_id)
+                    self.worker_queue[worker].append(task_id)
+                    self.assigned[task_id] = worker
+                    del(self.waiting[task_id])
+                    self.total_time_est[worker] += time_est
+                    task_ids.append(task_id)
+                MPI.Request.waitall(reqs, status) 
+        return task_ids
+
+    
+    def submit_multiple(self, name_to_call, args=[], kwargs=[],
+                        module_name="__main__", time_est=1, task_ids=None, workers=None):
+        """Submit multiple calls for parallel execution.
+
+        Analogous to submit_call, but accepts lists of arguments and
+        submits to multiple workers for asynchronous execution.
+
+        If called by a worker or if no workers are available, the call is instead
+        executed synchronously on this MPI node.
+
+        :arg str name_to_call: name of callable object (usually a function or
+            static method of a class) as contained in the namespace specified
+            by module.
+        :arg list args: the positional arguments to provide to the callable
+            object for each task, as a list of tuples.  Default: []
+        :arg list kwargs: the keyword arguments to provide to the callable
+            object for each task, as a list of dictionaries.  Default: []
+        :arg str module: optional name of the imported module or submodule in
+            whose namespace the callable object is contained. For objects
+            defined on the script level, this is "__main__", for objects
+            defined in an imported package, this is the package name. Must be a
+            key of the dictionary sys.modules (check there after import if in
+            doubt).  Default: "__main__"
+        :arg float time_est: estimated relative completion time for this call;
+            used to find a suitable worker. Default: 1
+        :type task_ids: list or None
+        :arg task_ids: unique ids for each call. Must be a possible dictionary key.
+            If None, a random id is assigned and returned. Can be re-used after
+            get_result() for this id. Default: None
+        :type workers: list of int > 0 and < comm.size, or None
+        :arg  worker: optional worker ids to assign the tasks to. If None, the
+            tasks are assigned in order to the workers with the smallest 
+            current total time estimate. Default: None
+        :return object: id of call, to be used in get_result().
+
+        """
+        if len(kwargs) > 0:
+            assert(len(args) == len(kwargs))
+        submitted_task_ids = []
+        if self.workers_available:
+            self.process()
+            N = len(args)
+            if (args is None) or (len(args) == 0):
+                kwargs = [dict() for _ in range(N)]
+            if (kwargs is None) or (len(kwargs) == 0):
+                kwargs = [dict() for _ in range(N)]
+            if task_ids is None:
+                task_ids = [None for _ in range(N)]
+            if workers is None:
+                workers = [None for _ in range(N)]
+            for this_args, this_kwargs, this_task_id, this_worker in zip(args, kwargs, task_ids, workers):
+                if this_task_id in self.assigned:
+                    raise RuntimeError(f"task id {task_id} already in queue!")
+                if this_task_id in self.waiting:
+                    raise RuntimeError(f"task id {task_id} already in wait queue!")
+                this_task_id = self.queue_call(name_to_call, args=this_args, kwargs=this_kwargs,
+                                               module_name=module_name, time_est=time_est,
+                                               task_id=this_task_id, requested_worker=this_worker)
+                submitted_task_ids.append(this_task_id)
+        else:
+            # perform call on this rank if no workers are available:
+            worker = 0
+            logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} ...")
+
+            try:
+                if module_name not in sys.modules:
+                    importlib.import_module(module_name)
+                object_to_call = eval(name_to_call,
+                                      sys.modules[module_name].__dict__)
+            except NameError:
+                logger.error(str(sys.modules[module_name].__dict__.keys()))
+                raise
+            if (args is None) or (len(args) == 0):
+                kwargs = [dict() for _ in range(N)]
+            if (kwargs is None) or (len(kwargs) == 0):
+                kwargs = [dict() for _ in range(N)]
+            if task_ids is None:
+                task_ids = [None for _ in range(N)]
+            if workers is None:
+                workers = [None for _ in range(N)]
+            for this_args, this_kwargs, this_task_id, this_worker in zip(args, kwargs, task_ids, workers):
+                call_time = time.time()
+                self.results[this_task_id] = object_to_call(*this_args, **this_kwargs)
+                self.result_queue.append(task_id)
+                this_time = time.time() - call_time
+                self.n_processed[0] += 1
+                self.total_time[0] = time.time() - start_time
+                self.stats.append({"id":task_id, "rank": worker,
+                                   "this_time": this_time,
+                                   "time_over_est": this_time / time_est,
+                                   "n_processed": self.n_processed[0],
+                                   "total_time": self.total_time[0]})
+                self.total_time_est[this_worker] += time_est
+                subitted_task_ids.append(this_task_id)
+
+        return submitted_task_ids
+
+
+    
     def get_ready_worker(self):
         """
         Returns the id and data of a ready worker.
         If there are no workers, or no worker is ready, returns (None, None)
         """
         if self.workers_available:
-            self.recv()
+            self.process()
             if len(self.ready_workers) > 0:
                 ready_total_time_est = np.asarray([self.total_time_est[worker] for worker in self.ready_workers])
                 worker = self.ready_workers[np.argmin(ready_total_time_est)]
@@ -397,7 +622,7 @@ class MPIController(object):
                         f"from worker {source} ...")
             
             while not (task_id in self.results):
-                self.recv()
+                self.process()
 
             logger.info(f"MPI controller : received result for call with id {task_id} "
                         f"from worker {source}.")
@@ -422,7 +647,7 @@ class MPIController(object):
         :return: id, return value of call, or None of there are no more calls in
                  the queue.
         """
-        self.recv()
+        self.process()
         if len(self.result_queue) > 0:
             task_id = self.result_queue.pop(0)
             return task_id, self.results[task_id]
@@ -444,7 +669,7 @@ class MPIController(object):
         :rtype:  object
         :return: id, return value of call, or None of there are no results ready.
         """
-        self.recv()
+        self.process()
         if len(self.result_queue) > 0:
             task_id = self.result_queue.pop(0)
             logger.info(f"MPI controller : received result for call with id {task_id} ...")
@@ -464,7 +689,7 @@ class MPIController(object):
         :rtype:  object
         :return: list of id, return value of call
         """
-        self.recv()
+        self.process()
         ret = []
         if len(self.result_queue) > 0:
             for i in range(len(self.result_queue)):
@@ -885,7 +1110,7 @@ class MPICollectiveBroker(object):
             req.wait()
 
             while True:
-                msg = self.recv()
+                msg = self.process()
                 if msg is not None:
                     tag, data = msg
                     break
@@ -1005,7 +1230,7 @@ class MPICollectiveBroker(object):
             req = self.comm.isend((task_id, results, stat), dest=0, tag=MessageTag.DONE.value)
             req.wait()
 
-    def recv(self):
+    def process(self):
         status = MPI.Status()
         if self.comm.Iprobe(source=0, tag=MPI.ANY_TAG):
             # get next task from controller queue:
