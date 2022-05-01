@@ -529,9 +529,9 @@ class MPIController(object):
                 workers = [None for _ in range(N)]
             for this_args, this_kwargs, this_task_id, this_worker in zip(args, kwargs, task_ids, workers):
                 if this_task_id in self.assigned:
-                    raise RuntimeError(f"task id {task_id} already in queue!")
+                    raise RuntimeError(f"task id {this_task_id} already in queue!")
                 if this_task_id in self.waiting:
-                    raise RuntimeError(f"task id {task_id} already in wait queue!")
+                    raise RuntimeError(f"task id {this_task_id} already in wait queue!")
                 this_task_id = self.queue_call(name_to_call, args=this_args, kwargs=this_kwargs,
                                                module_name=module_name, time_est=time_est,
                                                task_id=this_task_id, requested_worker=this_worker)
@@ -558,6 +558,13 @@ class MPIController(object):
             if workers is None:
                 workers = [None for _ in range(N)]
             for this_args, this_kwargs, this_task_id, this_worker in zip(args, kwargs, task_ids, workers):
+                if this_task_id is None:
+                    this_task_id = self.count
+                    self.count += 1
+                if this_task_id in self.assigned:
+                    raise RuntimeError(f"task id {this_task_id} already in queue!")
+                if this_task_id in self.waiting:
+                    raise RuntimeError(f"task id {this_task_id} already in wait queue!")
                 call_time = time.time()
                 self.results[this_task_id] = object_to_call(*this_args, **this_kwargs)
                 self.result_queue.append(this_task_id)
