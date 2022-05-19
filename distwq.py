@@ -34,6 +34,9 @@ available, otherwise processes calls sequentially in one process.
 import sys, time, signal, importlib, traceback, logging, random, json
 from enum import Enum, IntEnum
 import numpy as np
+from mpi4py.MPI import Intracomm
+from numpy import ndarray
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 class CollectiveMode(IntEnum):
     Gather = 1
@@ -107,7 +110,7 @@ start_time = time.time()
 
 class MPIController(object):
 
-    def __init__(self, comm, time_limit=None):
+    def __init__(self, comm: Intracomm, time_limit: Any=None) -> None:
         
         size = comm.size
         rank = comm.rank
@@ -181,7 +184,7 @@ class MPIController(object):
         - "total_time": total wall time until this call was finished
         """
 
-    def process(self, limit=1000):
+    def process(self, limit: int=1000) -> List[Union[int, Any]]:
         """
         Process incoming messages.
         """
@@ -223,8 +226,8 @@ class MPIController(object):
         return self.submit_waiting()
 
             
-    def submit_call(self, name_to_call, args=(), kwargs={},
-                    module_name="__main__", time_est=1, task_id=None, worker=None):
+    def submit_call(self, name_to_call: str, args: Tuple[Any]=(), kwargs: Dict[Any, Any]={},
+                    module_name: str="__main__", time_est: int=1, task_id: Optional[int]=None, worker: Optional[int]=None) -> int:
         """
         Submit a call for parallel execution.
 
@@ -360,8 +363,8 @@ class MPIController(object):
         self.total_time_est[worker] += time_est
         return task_id
     
-    def queue_call(self, name_to_call, args=(), kwargs={},
-                    module_name="__main__", time_est=1, task_id=None, requested_worker=None):
+    def queue_call(self, name_to_call: str, args: Union[List[Any], Tuple[Any]]=(), kwargs: Dict[Any, Any]={},
+                    module_name: str="__main__", time_est: int=1, task_id: Optional[int]=None, requested_worker: Optional[int]=None) -> int:
         """Submit a call for later execution.
 
         If called by the controller and workers are available, the
@@ -436,7 +439,7 @@ class MPIController(object):
 
         return task_id
 
-    def submit_waiting(self):
+    def submit_waiting(self) -> List[Union[int, Any]]:
         """
         Submit waiting tasks if workers are available.
         
@@ -477,8 +480,8 @@ class MPIController(object):
         return task_ids
 
     
-    def submit_multiple(self, name_to_call, args=[], kwargs=[],
-                        module_name="__main__", time_est=1, task_ids=None, workers=None):
+    def submit_multiple(self, name_to_call: str, args: List[List[Any]]=[], kwargs: Dict[Any, Any]={},
+                        module_name: str="__main__", time_est: int=1, task_ids: Optional[int]=None, workers: Optional[int]=None) -> List[int]:
         """Submit multiple calls for parallel execution.
 
         Analogous to submit_call, but accepts lists of arguments and
@@ -599,7 +602,7 @@ class MPIController(object):
         else:
             return None, None
     
-    def get_result(self, task_id):
+    def get_result(self, task_id: int) -> Union[Tuple[int, Tuple[ndarray, ndarray]], Tuple[int, List[Tuple[ndarray, ndarray]]]]:
         """
         Return result of earlier submitted call.
 
@@ -641,7 +644,7 @@ class MPIController(object):
         self.result_queue.remove(task_id)
         return task_id, result
 
-    def get_next_result(self):
+    def get_next_result(self) -> Optional[Union[Tuple[int, Tuple[ndarray, ndarray]], Tuple[int, List[Tuple[ndarray, ndarray]]]]]:
         """
         Return result of next earlier submitted call whose result has not yet
         been obtained.
@@ -706,7 +709,7 @@ class MPIController(object):
 
         return ret
 
-    def info(self):
+    def info(self) -> None:
         """
         Print processing statistics.
 
@@ -771,7 +774,7 @@ class MPIController(object):
                   "     coeff. of var. of actual over estd. time per call: "
                   f"{cvar_call_quotients:.04f}\n")
 
-    def exit(self):
+    def exit(self) -> None:
         """
         Tell all workers to exit.
 
@@ -801,7 +804,7 @@ class MPIController(object):
         
 class MPIWorker(object):        
 
-    def __init__(self, comm, group_comm, ready_data=None):
+    def __init__(self, comm: Intracomm, group_comm: Intracomm, ready_data: Optional[Any]=None) -> None:
         self.comm = comm
         self.group_comm = group_comm
         self.worker_id = rank
@@ -817,7 +820,7 @@ class MPIWorker(object):
 
         logger.info(f"MPI worker {self.worker_id}: initialized.")
         
-    def serve(self):
+    def serve(self) -> None:
         """
         Serve submitted calls until told to finish.
 
@@ -892,17 +895,17 @@ class MPIWorker(object):
         logger.info(f"MPI worker {self.worker_id}: aborting...")
         comm.Abort()
 
+
 class MPICollectiveWorker(object):
 
-    def __init__(self, comm, merged_comm, worker_id, n_workers, worker_service_name="distwq.init", collective_mode=CollectiveMode.Gather):
-
+    def __init__(self, comm: Intracomm, merged_comm: Intracomm, worker_id: int, n_workers: int, worker_service_name: str="distwq.init", collective_mode: CollectiveMode=CollectiveMode.Gather):
 
         self.collective_mode = collective_mode
         self.n_workers = n_workers
         self.worker_id = worker_id
         self.comm = comm
         self.merged_comm = merged_comm
-        
+
         self.worker_port = None
         self.server_worker_comm = None
         self.client_worker_comms = []
@@ -911,7 +914,7 @@ class MPICollectiveWorker(object):
         self.is_worker = True
         self.is_broker = False
 
-        
+
         self.start_time = start_time
         self.total_time_est = np.zeros(size)*np.nan
         self.total_time_est[rank] = 0
@@ -921,7 +924,7 @@ class MPICollectiveWorker(object):
         self.total_time[rank] = 0
         self.stats = []
 
-    def publish_service(self):
+    def publish_service(self) -> None:
         if not self.service_published:
             if self.comm.rank == 0:
                 try:
@@ -938,9 +941,9 @@ class MPICollectiveWorker(object):
                 self.worker_port = self.comm.bcast(None, root=0)
             self.comm.barrier()
             self.service_published = True
-                
-        
-    def connect_service(self, n_lookup_attempts=5):
+
+
+    def connect_service(self, n_lookup_attempts: int=5) -> None:
         info = MPI.INFO_NULL
         if not self.service_published:
             if self.comm.rank == 0:
@@ -966,10 +969,10 @@ class MPICollectiveWorker(object):
             for i in range(self.n_workers-1):
                 client_worker_comm = self.comm.Accept(self.worker_port, info, root=0)
                 self.client_worker_comms.append(client_worker_comm)
-        
 
-        
-    def serve(self):
+
+
+    def serve(self) -> None:
         """
         Serve submitted calls until told to finish. Tasks are
         obtained via scatter and results are returned via gather, 
@@ -1051,9 +1054,9 @@ class MPICollectiveWorker(object):
                 req.wait()
             else:
                 raise RuntimeError(f"MPICollectiveWorker: unknown collective mode {self.collective_mode}")
-                
 
-    def abort(self):
+
+    def abort(self) -> None:
         rank = self.comm.rank
         traceback.print_exc()
         logger.info(f"MPI collective worker {self.worker_id}-{rank}: aborting...")
@@ -1062,8 +1065,8 @@ class MPICollectiveWorker(object):
         
 class MPICollectiveBroker(object):        
 
-    def __init__(self, comm, group_comm, merged_comm, nprocs_per_worker, ready_data=None, is_worker=False, 
-                 collective_mode=CollectiveMode.Gather):
+    def __init__(self, comm: Intracomm, group_comm: Intracomm, merged_comm: Intracomm, nprocs_per_worker: int, ready_data: Optional[Any]=None, is_worker: bool=False, 
+                 collective_mode: CollectiveMode=CollectiveMode.Gather) -> None:
         logger.info(f'MPI collective broker {rank} starting')
         assert(not spawned)
         self.collective_mode=collective_mode
@@ -1085,7 +1088,7 @@ class MPICollectiveBroker(object):
         self.is_broker = True
         self.ready_data = ready_data
         
-    def serve(self):
+    def serve(self) -> None:
         """
         Broker and serve submitted calls until told to finish. A task
         is received from the controller and sent to all collective
@@ -1237,7 +1240,7 @@ class MPICollectiveBroker(object):
             req = self.comm.isend((task_id, results, stat), dest=0, tag=MessageTag.DONE.value)
             req.wait()
 
-    def process(self):
+    def process(self) -> Optional[Union[Tuple[int, None], Tuple[int, Tuple[str, Tuple[int], Dict[Any, Any], str, int, int]]]]:
         status = MPI.Status()
         if self.comm.Iprobe(source=0, tag=MPI.ANY_TAG):
             # get next task from controller queue:
@@ -1256,13 +1259,13 @@ class MPICollectiveBroker(object):
 
 
 
-def run(fun_name=None, module_name='__main__',
-        broker_fun_name=None, broker_module_name='__main__', max_workers=-1,
-        spawn_workers=False, sequential_spawn=False, spawn_startup_wait=None,
-        spawn_executable=None, spawn_args=[],
-        nprocs_per_worker=1, collective_mode="gather",
-        broker_is_worker=False, worker_service_name="distwq.init", enable_worker_service=False,
-        time_limit=None, verbose=False, args=()):
+def run(fun_name: Optional[str]=None, module_name: str='__main__',
+        broker_fun_name: Optional[str]=None, broker_module_name: str='__main__', max_workers: int=-1,
+        spawn_workers: bool=False, sequential_spawn: bool=False, spawn_startup_wait: Optional[int]=None,
+        spawn_executable: Optional[str]=None, spawn_args: List[Any]=[],
+        nprocs_per_worker: int=1, collective_mode: str="gather",
+        broker_is_worker: bool=False, worker_service_name: str="distwq.init", enable_worker_service: bool=False,
+        time_limit: Optional[int]=None, verbose: bool=False, args: Tuple[Any]=()) -> None:
     """
     Run in controller/worker mode until fun(controller/worker) finishes.
 
@@ -1455,7 +1458,7 @@ if __name__ == '__main__':
             collective_mode_arg = CollectiveMode.SendRecv
         else:
             raise RuntimeError(f"Unknown collective mode {collective_mode}")
-        
+
         worker = MPICollectiveWorker(world_comm, merged_comm, worker_id, n_workers,  
                                      collective_mode=collective_mode_arg,
                                      worker_service_name=worker_service_name)
