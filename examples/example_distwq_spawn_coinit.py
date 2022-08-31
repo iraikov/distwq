@@ -5,7 +5,6 @@ import pprint
 import sys
 
 import numpy as np
-import scipy
 from mpi4py import MPI
 from scipy import signal
 
@@ -55,7 +54,6 @@ def broker_init(broker):
         )
         print("broker %d: received data = %s" % (broker.worker_id, str(data)))
         sys.stdout.flush()
-        tag = status.Get_tag()
 
     if broker.worker_id == 1:
         broker.group_comm.bcast(data, root=0)

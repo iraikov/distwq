@@ -4,7 +4,6 @@
 import pprint
 
 import numpy as np
-import scipy
 from mpi4py import MPI
 from scipy import signal
 
@@ -48,7 +47,6 @@ def broker_init(broker):
     if broker.worker_id == 1:
         status = MPI.Status()
         data = broker.merged_comm.recv(source=0, tag=MPI.ANY_TAG, status=status)
-        tag = status.Get_tag()
 
     if broker.worker_id == 1:
         broker.group_comm.bcast(data, root=0)

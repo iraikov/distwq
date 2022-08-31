@@ -1,11 +1,7 @@
 # Example of using distributed work queue distwq
 # PYTHONPATH must include the directories in which distwq and this file are located.
 
-import numpy as np
-import scipy
-from mpi4py import MPI
 from neuron import h
-from scipy import signal
 
 import distwq
 

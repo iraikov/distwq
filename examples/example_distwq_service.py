@@ -5,8 +5,6 @@ import pprint
 import sys
 
 import numpy as np
-import scipy
-from mpi4py import MPI
 from scipy import signal
 
 import distwq

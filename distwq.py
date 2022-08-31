@@ -39,7 +39,7 @@ import signal
 import sys
 import time
 import traceback
-from enum import Enum, IntEnum
+from enum import IntEnum
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -85,7 +85,8 @@ def mpi_excepthook(type, value, traceback):
     MPI.COMM_WORLD.Abort(1)
 
 
-my_args = sys.argv[sys.argv.index("-") + 1 :] if "-" in sys.argv else None
+my_args_start_index = sys.argv.index("-") + 1
+my_args = sys.argv[my_args_start_index:] if "-" in sys.argv else None
 my_config = None
 
 # message types
@@ -122,11 +123,26 @@ n_workers = size - 1 if not spawned else int(my_config["n_workers"])
 start_time = time.time()
 
 
+def multiple_task_arguments(N, args, kwargs, task_ids, workers):
+    """
+    Helper function to set default arguments, task ids, and workers for multiple tasks.
+    """
+    if (args is None) or (len(args) == 0):
+        args = [dict() for _ in range(N)]
+    if (kwargs is None) or (len(kwargs) == 0):
+        kwargs = [dict() for _ in range(N)]
+    if task_ids is None:
+        task_ids = [None for _ in range(N)]
+    if workers is None:
+        workers = [None for _ in range(N)]
+
+    return args, kwargs, task_ids, workers
+
+
 class MPIController(object):
     def __init__(self, comm: Intracomm, time_limit: Any = None) -> None:
 
         size = comm.size
-        rank = comm.rank
 
         self.comm = comm
         self.workers_available = True if size > 1 else False
@@ -162,8 +178,8 @@ class MPIController(object):
         """
         self.active_workers = set([])
         """
-        (set)
-        active_workers contains the ids of workers that have communicated with the controller
+        (set) active_workers contains the ids of workers that have
+        communicated with the controller
         """
         self.n_processed = np.zeros(size).astype(np.int)
         """
@@ -188,7 +204,7 @@ class MPIController(object):
         """
         (list of dictionaries)
         stats[id] contains processing statistics for the last call with this id. Keys:
-        
+
         - "id": id of the call
         - "rank": MPI node who processed the call
         - "this_time": wall time for processing the call
@@ -329,10 +345,7 @@ class MPIController(object):
         if task_id is None:
             task_id = self.count
             self.count += 1
-        if task_id in self.assigned:
-            raise RuntimeError(f"task id {task_id} already in queue!")
-        if task_id in self.waiting:
-            raise RuntimeError(f"task id {task_id} already in wait queue!")
+        self.check_valid_task_id(task_id)
         if self.workers_available:
             self.process()
             if len(self.ready_workers) > 0:
@@ -454,10 +467,7 @@ class MPIController(object):
         if task_id is None:
             task_id = self.count
             self.count += 1
-        if task_id in self.assigned:
-            raise RuntimeError(f"task id {task_id} already in queue!")
-        if task_id in self.waiting:
-            raise RuntimeError(f"task id {task_id} already in wait queue!")
+        self.check_valid_task_id(task_id)
         if self.workers_available:
             self.wait_queue.append(task_id)
             self.waiting[task_id] = (
@@ -537,8 +547,8 @@ class MPIController(object):
 
                     # send name to call, args, time_est to worker:
                     logger.info(
-                        f"MPI controller : assigning waiting call with id {task_id} to worker "
-                        f"{worker}: {name_to_call} {args} {kwargs} ..."
+                        f"MPI controller : assigning waiting call with id {task_id} "
+                        f"to worker {worker}: {name_to_call} {args} {kwargs} ..."
                     )
                     req = self.comm.isend(
                         (name_to_call, args, kwargs, module_name, time_est, task_id),
@@ -608,21 +618,13 @@ class MPIController(object):
         N = len(args)
         if self.workers_available:
             self.process()
-            if (args is None) or (len(args) == 0):
-                kwargs = [dict() for _ in range(N)]
-            if (kwargs is None) or (len(kwargs) == 0):
-                kwargs = [dict() for _ in range(N)]
-            if task_ids is None:
-                task_ids = [None for _ in range(N)]
-            if workers is None:
-                workers = [None for _ in range(N)]
+            args, kwargs, task_ids, workers = multiple_task_arguments(
+                N, args, kwargs, task_ids, workers
+            )
             for this_args, this_kwargs, this_task_id, this_worker in zip(
                 args, kwargs, task_ids, workers
             ):
-                if this_task_id in self.assigned:
-                    raise RuntimeError(f"task id {this_task_id} already in queue!")
-                if this_task_id in self.waiting:
-                    raise RuntimeError(f"task id {this_task_id} already in wait queue!")
+                self.check_valid_task_id(this_task_id)
                 this_task_id = self.queue_call(
                     name_to_call,
                     args=this_args,
@@ -645,24 +647,16 @@ class MPIController(object):
             except NameError:
                 logger.error(str(sys.modules[module_name].__dict__.keys()))
                 raise
-            if (args is None) or (len(args) == 0):
-                kwargs = [dict() for _ in range(N)]
-            if (kwargs is None) or (len(kwargs) == 0):
-                kwargs = [dict() for _ in range(N)]
-            if task_ids is None:
-                task_ids = [None for _ in range(N)]
-            if workers is None:
-                workers = [None for _ in range(N)]
+            args, kwargs, task_ids, workers = multiple_task_arguments(
+                N, args, kwargs, task_ids, workers
+            )
             for this_args, this_kwargs, this_task_id, this_worker in zip(
                 args, kwargs, task_ids, workers
             ):
                 if this_task_id is None:
                     this_task_id = self.count
                     self.count += 1
-                if this_task_id in self.assigned:
-                    raise RuntimeError(f"task id {this_task_id} already in queue!")
-                if this_task_id in self.waiting:
-                    raise RuntimeError(f"task id {this_task_id} already in wait queue!")
+                self.check_valid_task_id(this_task_id)
                 call_time = time.time()
                 self.results[this_task_id] = object_to_call(*this_args, **this_kwargs)
                 self.result_queue.append(this_task_id)
@@ -732,7 +726,7 @@ class MPIController(object):
             if self.worker_queue[source][0] != task_id:
                 raise RuntimeError(
                     f"get_result({task_id})) called before get_result("
-                    f"{worker_queue[source][0]})"
+                    f"{self.worker_queue[source][0]})"
                 )
             logger.info(
                 f"MPI controller : retrieving result for call with id {task_id} "
@@ -928,6 +922,16 @@ class MPIController(object):
         logger.error("MPI controller : aborting...")
         self.comm.Abort()
 
+    def check_valid_task_id(self, task_id):
+        """
+        Given a new task id, check that it is not already assigned or waiting.
+        """
+        if task_id in self.assigned:
+            raise RuntimeError(f"task id {task_id} already in queue!")
+        if task_id in self.waiting:
+            raise RuntimeError(f"task id {task_id} already in wait queue!")
+        return True
+
 
 class MPIWorker(object):
     def __init__(
@@ -963,7 +967,6 @@ class MPIWorker(object):
         If you don't define workerfun(), serve() will be called automatically by
         run().
         """
-        size = self.comm.size
         rank = self.comm.rank
 
         logger.info(f"MPI worker {rank}: waiting for calls.")
@@ -1031,10 +1034,9 @@ class MPIWorker(object):
                 time.sleep(1)
 
     def abort(self):
-        rank = self.comm.rank
         traceback.print_exc()
         logger.info(f"MPI worker {self.worker_id}: aborting...")
-        comm.Abort()
+        self.comm.Abort()
 
 
 class MPICollectiveWorker(object):
@@ -1110,7 +1112,8 @@ class MPICollectiveWorker(object):
             self.comm.barrier()
             if not self.worker_port:
                 raise RuntimeError(
-                    f"connect_service: unable to lookup service {self.worker_service_name}"
+                    f"connect_service: unable to lookup service "
+                    f"{self.worker_service_name}"
                 )
             self.server_worker_comm = self.comm.Connect(self.worker_port, info, root=0)
         else:
@@ -1139,7 +1142,6 @@ class MPICollectiveWorker(object):
 
         rank = self.comm.rank
         merged_rank = self.merged_comm.Get_rank()
-        merged_size = self.merged_comm.Get_size()
         logger.info(
             f"MPI collective worker {self.worker_id}-{rank}: waiting for calls."
         )
@@ -1148,29 +1150,17 @@ class MPICollectiveWorker(object):
         while True:
             if rank == 0:
                 logger.info(
-                    f"MPI collective worker {self.worker_id}-{rank}: getting next task from queue..."
+                    f"MPI collective worker {self.worker_id}-{rank}: "
+                    "getting next task from queue..."
                 )
             # get next task from queue:
-            if self.collective_mode == CollectiveMode.Gather:
-                req = self.merged_comm.Ibarrier()
-                (
-                    name_to_call,
-                    args,
-                    kwargs,
-                    module,
-                    time_est,
-                    task_id,
-                ) = self.merged_comm.scatter(None, root=0)
-                req.wait()
-            elif self.collective_mode == CollectiveMode.SendRecv:
-                buf = bytearray(1 << 20)  # TODO: 1 MB buffer, make it configurable
-                req = self.merged_comm.irecv(buf, source=0, tag=MessageTag.TASK.value)
-                (name_to_call, args, kwargs, module, time_est, task_id) = req.wait()
-            else:
-                raise RuntimeError(f"Unknown collective mode {collective_mode}")
+            name_to_call, args, kwargs, module, time_est, task_id = self.get_next_task(
+                self
+            )
             if rank == 0:
                 logger.info(
-                    f"MPI collective worker {self.worker_id}-{rank}: received next task from queue."
+                    f"MPI collective worker {self.worker_id}-{rank}: "
+                    "received next task from queue."
                 )
             # TODO: add timeout and check whether controller lives!
             if name_to_call == "exit":
@@ -1208,25 +1198,49 @@ class MPICollectiveWorker(object):
                     "total_time": time.time() - start_time,
                 }
             )
-            if self.collective_mode == CollectiveMode.Gather:
-                req = self.merged_comm.Ibarrier()
-                self.merged_comm.gather((result, self.stats[-1]), root=0)
-                req.wait()
-            elif self.collective_mode == CollectiveMode.SendRecv:
-                req = self.merged_comm.isend(
-                    (result, self.stats[-1]), dest=0, tag=MessageTag.DONE.value
-                )
-                req.wait()
-            else:
-                raise RuntimeError(
-                    f"MPICollectiveWorker: unknown collective mode {self.collective_mode}"
-                )
+            self.gather_results(result)
+
+    def gather_results(self, result):
+        if self.collective_mode == CollectiveMode.Gather:
+            req = self.merged_comm.Ibarrier()
+            self.merged_comm.gather((result, self.stats[-1]), root=0)
+            req.wait()
+        elif self.collective_mode == CollectiveMode.SendRecv:
+            req = self.merged_comm.isend(
+                (result, self.stats[-1]), dest=0, tag=MessageTag.DONE.value
+            )
+            req.wait()
+        else:
+            raise RuntimeError(
+                "MPICollectiveWorker: unknown collective mode "
+                f"{self.collective_mode}"
+            )
+
+    def get_next_task(self):
+        if self.collective_mode == CollectiveMode.Gather:
+            req = self.merged_comm.Ibarrier()
+            (
+                name_to_call,
+                args,
+                kwargs,
+                module,
+                time_est,
+                task_id,
+            ) = self.merged_comm.scatter(None, root=0)
+            req.wait()
+        elif self.collective_mode == CollectiveMode.SendRecv:
+            buf = bytearray(1 << 20)  # TODO: 1 MB buffer, make it configurable
+            req = self.merged_comm.irecv(buf, source=0, tag=MessageTag.TASK.value)
+            (name_to_call, args, kwargs, module, time_est, task_id) = req.wait()
+        else:
+            raise RuntimeError(f"Unknown collective mode {collective_mode}")
+        return (name_to_call, args, kwargs, module, time_est, task_id)
 
     def abort(self) -> None:
         rank = self.comm.rank
         traceback.print_exc()
         logger.info(f"MPI collective worker {self.worker_id}-{rank}: aborting...")
-        comm.Abort()
+        self.comm.Abort()
 
 
 class MPICollectiveBroker(object):
@@ -1278,17 +1292,16 @@ class MPICollectiveBroker(object):
         If you don't define workerfun(), serve() will be called automatically by
         run().
         """
-        size = self.comm.size
         rank = self.comm.rank
         merged_rank = self.merged_comm.Get_rank()
-        merged_size = self.merged_comm.Get_size()
 
         logger.info(f"MPI worker broker {self.worker_id}: waiting for calls.")
 
         # wait for orders:
         while True:
             logger.info(
-                f"MPI collective broker {self.worker_id}: getting next task from controller..."
+                f"MPI collective broker {self.worker_id}: "
+                "getting next task from controller..."
             )
             # signal the controller this worker is ready
             req = self.comm.isend(self.ready_data, dest=0, tag=MessageTag.READY.value)
@@ -1301,33 +1314,13 @@ class MPICollectiveBroker(object):
                     break
 
             logger.info(
-                f"MPI collective broker {self.worker_id}: received message from controller..."
+                f"MPI collective broker {self.worker_id}: "
+                "received message from controller..."
             )
 
             if tag == MessageTag.EXIT.value:
                 logger.info(f"MPI worker broker {self.worker_id}: exiting...")
-                msg = ("exit", (), {}, "", 0, 0)
-                if self.collective_mode == CollectiveMode.Gather:
-                    req = self.merged_comm.Ibarrier()
-                    self.merged_comm.scatter([msg] * merged_size, root=0)
-                    req.wait()
-                elif self.collective_mode == CollectiveMode.SendRecv:
-                    reqs = []
-                    status = []
-                    for i in range(self.nprocs_per_worker):
-                        req = self.merged_comm.isend(
-                            msg,
-                            dest=i if self.is_worker else i + 1,
-                            tag=MessageTag.TASK.value,
-                        )
-                        reqs.append(req)
-                        status.append(MPI.Status())
-                    MPI.Request.waitall(reqs, status)
-                else:
-                    raise RuntimeError(
-                        f"MPICollectiveBroker: unknown collective mode {self.collective_mode}"
-                    )
-
+                self.scatter_task("exit", (), {}, "", 0, 0)
                 break
             elif tag == MessageTag.TASK.value:
                 (name_to_call, args, kwargs, module, time_est, task_id) = data
@@ -1335,41 +1328,16 @@ class MPICollectiveBroker(object):
                 raise RuntimeError(f"MPI collective broker: unknown message tag {tag}")
 
             logger.info(
-                f"MPI collective broker {self.worker_id}: sending task {task_id} to workers..."
+                f"MPI collective broker {self.worker_id}: "
+                f"sending task {task_id} to workers..."
             )
-            if self.collective_mode == CollectiveMode.Gather:
-                req = self.merged_comm.Ibarrier()
-                self.merged_comm.scatter(
-                    [(name_to_call, args, kwargs, module, time_est, task_id)]
-                    * merged_size,
-                    root=merged_rank,
-                )
-                req.wait()
-            elif self.collective_mode == CollectiveMode.SendRecv:
-                msg = (name_to_call, args, kwargs, module, time_est, task_id)
-                reqs = []
-                status = []
-                for i in range(self.nprocs_per_worker):
-                    req = self.merged_comm.isend(
-                        msg,
-                        dest=i if self.is_worker else i + 1,
-                        tag=MessageTag.TASK.value,
-                    )
-                    reqs.append(req)
-                    status.append(MPI.Status())
-                MPI.Request.waitall(reqs, status)
-            else:
-                raise RuntimeError(
-                    f"MPICollectiveBroker: unknown collective mode {self.collective_mode}"
-                )
-
+            self.scatter_task(name_to_call, args, kwargs, module, time_est, task_id)
             logger.info(
                 f"MPI collective broker {self.worker_id}: sending task complete."
             )
 
             self.total_time_est[rank] += time_est
             if self.is_worker:
-
                 try:
                     if module not in sys.modules:
                         importlib.import_module(module)
@@ -1398,46 +1366,10 @@ class MPICollectiveBroker(object):
                 this_time = 0
 
             logger.info(
-                f"MPI collective broker {self.worker_id}: gathering data from workers..."
+                f"MPI collective broker {self.worker_id}: "
+                "gathering data from workers..."
             )
-            if self.collective_mode == CollectiveMode.Gather:
-                req = self.merged_comm.Ibarrier()
-                sub_data = self.merged_comm.gather(
-                    (this_result, this_stat), root=merged_rank
-                )
-                req.wait()
-                results = [result for result, stat in sub_data if result is not None]
-                stats = [stat for result, stat in sub_data if stat is not None]
-            elif self.collective_mode == CollectiveMode.SendRecv:
-                reqs = []
-                for i in range(self.nprocs_per_worker):
-                    buf = bytearray(1 << 20)  # TODO: 1 MB buffer, make it configurable
-                    req = self.merged_comm.irecv(
-                        buf,
-                        source=i if self.is_worker else i + 1,
-                        tag=MessageTag.DONE.value,
-                    )
-                    reqs.append(req)
-                status = [MPI.Status() for i in range(self.nprocs_per_worker)]
-                try:
-                    sub_data = MPI.Request.waitall(reqs, status)
-                except:
-                    print([MPI.Get_error_string(s.Get_error()) for s in status])
-                    raise
-                del reqs
-                results = [result for result, stat in sub_data if result is not None]
-                stats = [stat for result, stat in sub_data if stat is not None]
-                if this_result is not None:
-                    results = [this_result] + results
-                    stats = [this_stat] + stats
-            else:
-                raise RuntimeError(
-                    f"MPICollectiveBroker: unknown collective mode {self.collective_mode}"
-                )
-            logger.info(
-                f"MPI collective broker {self.worker_id}: gathered {len(results)} results from workers..."
-            )
-
+            results, stats = self.gather_results(this_result, this_stat)
             stat_times = np.asarray([stat["this_time"] for stat in stats])
             max_time = 0.0
             if len(stat_times) > 0:
@@ -1445,14 +1377,53 @@ class MPICollectiveBroker(object):
                 stat = stats[max_time]
             else:
                 stat = None
-            ready = True
             logger.info(
-                f"MPI collective broker {self.worker_id}: sending results to controller..."
+                f"MPI collective broker {self.worker_id}: "
+                "sending results to controller..."
             )
             req = self.comm.isend(
                 (task_id, results, stat), dest=0, tag=MessageTag.DONE.value
             )
             req.wait()
+
+    def gather_results(self, this_result, this_stat):
+        merged_rank = self.merged_comm.Get_rank()
+        if self.collective_mode == CollectiveMode.Gather:
+            req = self.merged_comm.Ibarrier()
+            sub_data = self.merged_comm.gather(
+                (this_result, this_stat), root=merged_rank
+            )
+            req.wait()
+            results = [result for result, stat in sub_data if result is not None]
+            stats = [stat for result, stat in sub_data if stat is not None]
+        elif self.collective_mode == CollectiveMode.SendRecv:
+            reqs = []
+            for i in range(self.nprocs_per_worker):
+                buf = bytearray(1 << 20)  # TODO: 1 MB buffer, make it configurable
+                req = self.merged_comm.irecv(
+                    buf,
+                    source=i if self.is_worker else i + 1,
+                    tag=MessageTag.DONE.value,
+                )
+                reqs.append(req)
+            status = [MPI.Status() for i in range(self.nprocs_per_worker)]
+            try:
+                sub_data = MPI.Request.waitall(reqs, status)
+            except MPI.Exception:
+                logger.error([MPI.Get_error_string(s.Get_error()) for s in status])
+                raise
+            del reqs
+            results = [result for result, stat in sub_data if result is not None]
+            stats = [stat for result, stat in sub_data if stat is not None]
+            if this_result is not None:
+                results = [this_result] + results
+                stats = [this_stat] + stats
+        else:
+            raise RuntimeError(
+                "MPICollectiveBroker: unknown collective mode "
+                f"{self.collective_mode}"
+            )
+        return results, stats
 
     def process(
         self,
@@ -1476,7 +1447,141 @@ class MPICollectiveBroker(object):
         rank = self.comm.rank
         traceback.print_exc()
         logger.info(f"MPI worker broker {rank}: aborting...")
-        comm.Abort()
+        self.comm.Abort()
+
+
+def do_spawn_workers(
+    fun,
+    fun_name,
+    module_name,
+    world_comm,
+    group_comm,
+    worker_id,
+    n_workers,
+    nprocs_per_worker,
+    broker_is_worker,
+    collective_mode,
+    enable_worker_service,
+    worker_service_name,
+    spawn_args,
+    sequential_spawn,
+    spawn_startup_wait,
+    spawn_executable,
+    verbose,
+):
+
+    worker_config = {
+        "worker_id": worker_id,
+        "n_workers": n_workers,
+        "collective_mode": collective_mode,
+        "enable_worker_service": enable_worker_service,
+        "worker_service_name": worker_service_name,
+        "verbose": verbose,
+    }
+    if fun is not None:
+        worker_config["init_fun_name"] = str(fun_name)
+        worker_config["init_module_name"] = str(module_name)
+    spawn_stmts = (
+        f"import sys, runpy; sys.argv.extend"
+        f"(['-', 'distwq:spawned', '{json.dumps(worker_config)}']); "
+        f"runpy.run_module('distwq', run_name='__main__'); sys.exit()"
+    )
+    if callable(spawn_args):
+        arglist = spawn_args(["-c", spawn_stmts])
+    else:
+        arglist = spawn_args + ["-c", spawn_stmts]
+    logger.info(f"MPI broker {worker_id} : before spawn")
+    worker_id = rank
+    if collective_mode.lower() == "gather":
+        collective_mode_arg = CollectiveMode.Gather
+    elif collective_mode.lower() == "sendrecv":
+        collective_mode_arg = CollectiveMode.SendRecv
+    else:
+        raise RuntimeError(f"Unknown collective mode {collective_mode}")
+
+    if sequential_spawn and (worker_id > 1):
+        status = MPI.Status()
+        _ = group_comm.recv(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
+    if spawn_startup_wait is not None:
+        spawn_startup_wait = max(spawn_startup_wait, 2)
+        time.sleep(random.randrange(1, spawn_startup_wait))
+    req = world_comm.Ibarrier()
+    try:
+        if spawn_executable is None:
+            spawn_executable = sys.executable
+        sub_comm = MPI.COMM_SELF.Spawn(
+            spawn_executable,
+            args=arglist,
+            maxprocs=nprocs_per_worker - 1 if broker_is_worker else nprocs_per_worker,
+        )
+    except MPI.Exception:
+        logger.error(f"MPI broker {worker_id} : spawn error")
+        raise
+    if sequential_spawn and (worker_id < n_workers):
+        group_comm.send("spawn", dest=worker_id)
+    logger.info(f"MPI broker {worker_id} : after spawn")
+    req.wait()
+    req = sub_comm.Ibarrier()
+    merged_comm = sub_comm.Merge(False)
+    req.wait()
+    return sub_comm, merged_comm, collective_mode_arg
+
+
+def get_group_comm(world_comm, size, rank, is_controller, spawned):
+    group_id = 0
+    group_comm = None
+    if not spawned and (size > 1):
+        if is_controller:
+            group_id = 2
+        elif is_worker:
+            group_id = 1
+        else:
+            group_id = 3
+        group_comm = world_comm.Split(group_id, rank)
+    else:
+        group_comm = world_comm
+
+    return group_id, group_comm
+
+
+def get_fun(fun_name, module_name):
+    fun = None
+    if fun_name is not None:
+        if module_name not in sys.modules:
+            importlib.import_module(module_name)
+        fun = eval(fun_name, sys.modules[module_name].__dict__)
+    return fun
+
+
+def check_spawn_config(
+    spawn_workers,
+    nprocs_per_worker,
+    broker_is_worker,
+    enable_worker_service,
+    broker_fun,
+):
+
+    if broker_fun is not None:
+        if spawn_workers is not True:
+            raise RuntimeError(
+                "distwq.run: cannot use broker_fun_name when "
+                "spawn_workers is set to False"
+            )
+    if broker_is_worker:
+        raise RuntimeError(
+            "distwq.run: cannot use broker_fun_name when "
+            "broker_is_worker is set to True"
+        )
+    if spawn_workers and (nprocs_per_worker == 1) and broker_is_worker:
+        raise RuntimeError(
+            "distwq.run: cannot spawn workers when nprocs_per_worker=1 "
+            "and broker_is_worker is set to True"
+        )
+    if enable_worker_service and (not spawn_workers):
+        raise RuntimeError(
+            "distwq.run: cannot enable worker service when "
+            "spawn_workers is set to False"
+        )
 
 
 def run(
@@ -1499,8 +1604,7 @@ def run(
     verbose: bool = False,
     args: Tuple[Any] = (),
 ) -> None:
-    """
-    Run in controller/worker mode until fun(controller/worker) finishes.
+    """Run in controller/worker mode until fun(controller/worker) finishes.
 
     Must be called on all MPI nodes.
 
@@ -1512,25 +1616,36 @@ def run(
 
     :arg string module_name: module where fun_name is located
     :arg bool verbose: whether processing information should be printed.
-    :arg bool spawn_workers: whether to spawn separate worker processes via MPI_Comm_spawn
-    :arg bool sequential_spawn: whether to spawn processes in sequence
-    :arg string spawn_executable: optional executable name for call to spawn (default is sys.executable)
-    :arg string list spawn_args: optional arguments to prepend to list of arguments in call to spawn; or a callable that takes the list of arguments that distwq needs to pass to the python interpreter, and returns a new list of arguments
-    :arg int nprocs_per_worker: how many processes per worker
-    :arg broker_is_worker: when spawn_worker is True or nprocs_per_worker > 1, MPI_Spawn will be used to create workers,
-    and a CollectiveBroker object is used to relay tasks and results between controller and worker.
-    When broker_is_worker is true, the broker also participates in serving tasks, otherwise it only
-    relays calls.
-    :arg time_limit: maximum wall clock time, in seconds
-    :arg args: additional args to pass to fun
 
+    :arg bool spawn_workers: whether to spawn separate worker
+    processes via MPI_Comm_spawn
+
+    :arg bool sequential_spawn: whether to spawn processes in sequence
+
+    :arg string spawn_executable: optional executable name for call to
+    spawn (default is sys.executable)
+
+    :arg string list spawn_args: optional arguments to prepend to list
+    of arguments in call to spawn; or a callable that takes the list
+    of arguments that distwq needs to pass to the python interpreter,
+    and returns a new list of arguments
+
+    :arg int nprocs_per_worker: how many processes per worker
+
+    :arg broker_is_worker: when spawn_worker is True or
+    nprocs_per_worker > 1, MPI_Spawn will be used to create workers,
+    and a CollectiveBroker object is used to relay tasks and results
+    between controller and worker.  When broker_is_worker is true, the
+    broker also participates in serving tasks, otherwise it only
+    relays calls.
+
+    :arg time_limit: maximum wall clock time, in seconds
+
+    :arg args: additional args to pass to fun
 
     """
 
-    if verbose:
-        logging.basicConfig(level=logging.INFO)
-    else:
-        logging.basicConfig(level=logging.WARN)
+    logging.basicConfig(level=logging.INFO if verbose else logging.WARN)
 
     assert nprocs_per_worker > 0
     assert not spawned
@@ -1538,36 +1653,17 @@ def run(
     global n_workers, is_worker
     if max_workers > 0:
         n_workers = min(max_workers, n_workers)
-        if rank > n_workers:
-            is_worker = False
+        is_worker = rank < n_workers
 
-    if not spawned and (size > 1):
-        group_id = 0
-        if is_controller:
-            group_id = 2
-        elif is_worker:
-            group_id = 1
-        else:
-            group_id = 3
-        group_comm = world_comm.Split(group_id, rank)
-    else:
-        group_comm = world_comm
+    group_id, group_comm = get_group_comm(
+        world_comm, size, rank, is_controller, spawned
+    )
 
-    fun = None
-    if fun_name is not None:
-        if module_name not in sys.modules:
-            importlib.import_module(module_name)
-        fun = eval(fun_name, sys.modules[module_name].__dict__)
-
-    broker_fun = None
-    if broker_fun_name is not None:
-        if broker_module_name not in sys.modules:
-            importlib.import_module(broker_module_name)
-        broker_fun = eval(broker_fun_name, sys.modules[broker_module_name].__dict__)
+    fun = get_fun(fun_name, module_name)
+    broker_fun = get_fun(broker_fun_name, module_name)
 
     if has_mpi:  # run in mpi mode
-        if (n_workers > 0) and (nprocs_per_worker > 1):
-            spawn_workers = True
+        spawn_workers = (n_workers > 0) and (nprocs_per_worker > 1)
         if is_controller:  # I'm the controller
             assert fun is not None
             controller = MPIController(world_comm, time_limit=time_limit)
@@ -1579,104 +1675,62 @@ def run(
             except ValueError:
                 controller.abort()
             controller.exit()
-        elif is_worker:  # I'm a worker or a broker
+        elif is_worker and spawn_workers:  # I'm a broker
             worker_id = rank
-            if broker_fun is not None:
-                if spawn_workers is not True:
-                    raise RuntimeError(
-                        "distwq.run: cannot use broker_fun_name when spawn_workers is set to False"
-                    )
+            check_spawn_config(
+                spawn_workers,
+                nprocs_per_worker,
+                broker_is_worker,
+                enable_worker_service,
+                broker_fun,
+            )
+            sub_comm, merged_comm, collective_mode_arg = do_spawn_workers(
+                fun,
+                fun_name,
+                module_name,
+                world_comm,
+                group_comm,
+                worker_id,
+                n_workers,
+                nprocs_per_worker,
+                broker_is_worker,
+                collective_mode,
+                enable_worker_service,
+                worker_service_name,
+                spawn_args,
+                sequential_spawn,
+                spawn_startup_wait,
+                spawn_executable,
+                verbose,
+            )
+            broker = MPICollectiveBroker(
+                world_comm,
+                group_comm,
+                merged_comm,
+                nprocs_per_worker,
+                is_worker=broker_is_worker,
+                collective_mode=collective_mode_arg,
+            )
+            if fun is not None:
+                req = merged_comm.Ibarrier()
+                merged_comm.bcast(args, root=0)
+                req.wait()
                 if broker_is_worker:
-                    raise RuntimeError(
-                        "distwq.run: cannot use broker_fun_name when broker_is_worker is set to True"
-                    )
-            if spawn_workers and (nprocs_per_worker == 1) and broker_is_worker:
-                raise RuntimeError(
-                    "distwq.run: cannot spawn workers when nprocs_per_worker=1 and broker_is_worker is set to True"
-                )
-            if enable_worker_service and (not spawn_workers):
-                raise RuntimeError(
-                    "distwq.run: cannot enable worker service when spawn_workers is set to False"
-                )
-            if spawn_workers:
-                worker_config = {
-                    "worker_id": worker_id,
-                    "n_workers": n_workers,
-                    "collective_mode": collective_mode,
-                    "enable_worker_service": enable_worker_service,
-                    "worker_service_name": worker_service_name,
-                    "verbose": verbose,
-                }
-                if fun is not None:
-                    worker_config["init_fun_name"] = str(fun_name)
-                    worker_config["init_module_name"] = str(module_name)
-                spawn_stmts = f"import sys, runpy; sys.argv.extend(['-', 'distwq:spawned', '{json.dumps(worker_config)}']); runpy.run_module('distwq', run_name='__main__'); sys.exit()"
-                if callable(spawn_args):
-                    arglist = spawn_args(["-c", spawn_stmts])
-                else:
-                    arglist = spawn_args + ["-c", spawn_stmts]
-                logger.info(f"MPI broker {worker_id} : before spawn")
-                worker_id = rank
-                if collective_mode.lower() == "gather":
-                    collective_mode_arg = CollectiveMode.Gather
-                elif collective_mode.lower() == "sendrecv":
-                    collective_mode_arg = CollectiveMode.SendRecv
-                else:
-                    raise RuntimeError(f"Unknown collective mode {collective_mode}")
-
-                if sequential_spawn and (worker_id > 1):
-                    status = MPI.Status()
-                    data = group_comm.recv(
-                        source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status
-                    )
-                if spawn_startup_wait is not None:
-                    spawn_startup_wait = max(spawn_startup_wait, 2)
-                    time.sleep(random.randrange(1, spawn_startup_wait))
-                req = world_comm.Ibarrier()
-                try:
-                    if spawn_executable is None:
-                        spawn_executable = sys.executable
-                    sub_comm = MPI.COMM_SELF.Spawn(
-                        spawn_executable,
-                        args=arglist,
-                        maxprocs=nprocs_per_worker - 1
-                        if broker_is_worker
-                        else nprocs_per_worker,
-                    )
-                except:
-                    logger.error(f"MPI broker {worker_id} : spawn error")
-                    raise
-                if sequential_spawn and (worker_id < n_workers):
-                    group_comm.send("spawn", dest=worker_id)
-                logger.info(f"MPI broker {worker_id} : after spawn")
-                req.wait()
-                req = sub_comm.Ibarrier()
-                merged_comm = sub_comm.Merge(False)
-                req.wait()
-                broker = MPICollectiveBroker(
-                    world_comm,
-                    group_comm,
-                    merged_comm,
-                    nprocs_per_worker,
-                    is_worker=broker_is_worker,
-                    collective_mode=collective_mode_arg,
-                )
-                if fun is not None:
-                    req = merged_comm.Ibarrier()
-                    merged_comm.bcast(args, root=0)
-                    req.wait()
-                if broker_is_worker and (fun is not None):
                     fun(broker, *args)
-                elif broker_fun is not None:
-                    broker_fun(broker, *args)
-                broker.serve()
-            else:
-                req = world_comm.Ibarrier()
-                req.wait()
-                worker = MPIWorker(world_comm, group_comm)
-                if fun is not None:
-                    fun(worker, *args)
-                worker.serve()
+            if broker_fun is not None:
+                broker_fun(broker, *args)
+            broker.serve()
+        elif is_worker:  # I'm a worker
+            worker_id = rank
+            req = world_comm.Ibarrier()
+            req.wait()
+            worker = MPIWorker(world_comm, group_comm)
+            if fun is not None:
+                fun(worker, *args)
+            worker.serve()
+        else:
+            raise RuntimeError("distwq.run: invalid worker configuration")
+
     else:  # run as single processor
         assert fun is not None
         logger.info("MPI controller : not available, running as a single process.")

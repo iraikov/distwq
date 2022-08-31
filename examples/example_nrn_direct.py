@@ -5,8 +5,7 @@ import itertools
 import time
 
 import numpy as np
-from mpi4py import MPI
-from neuron import coreneuron, gui, h
+from neuron import coreneuron, h
 
 import distwq
 
@@ -38,7 +37,7 @@ class MyCell:
         self.synlist = []
 
 
-## Creates half-gap junction mechanism
+# Creates half-gap junction mechanism
 def mkgap(pc, sec, gid, secpos, sgid, dgid, w, gjlist):
     myrank = int(pc.id())
 
@@ -98,10 +97,8 @@ def mkcells(pc, ngids):
                 )
 
 
-## Creates connections:
+# Creates connections:
 def connectcells(pc, ngids):
-    nranks = int(pc.nhost())
-    myrank = int(pc.id())
 
     for gid in range(0, ngids, 2):
 
