@@ -40,11 +40,11 @@ import sys
 import time
 import traceback
 from enum import IntEnum
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-from mpi4py.MPI import Intracomm
-from numpy import ndarray
+from mpi4py.MPI import Intercomm, Intracomm
+from numpy import float64, ndarray
 
 
 class CollectiveMode(IntEnum):
@@ -85,8 +85,9 @@ def mpi_excepthook(type, value, traceback):
     MPI.COMM_WORLD.Abort(1)
 
 
-my_args_start_index = sys.argv.index("-") + 1
-my_args = sys.argv[my_args_start_index:] if "-" in sys.argv else None
+has_args = "-" in sys.argv
+my_args_start_index = sys.argv.index("-") + 1 if has_args else 0
+my_args = sys.argv[my_args_start_index:] if has_args else None
 my_config = None
 
 # message types
@@ -922,7 +923,7 @@ class MPIController(object):
         logger.error("MPI controller : aborting...")
         self.comm.Abort()
 
-    def check_valid_task_id(self, task_id):
+    def check_valid_task_id(self, task_id: int) -> bool:
         """
         Given a new task id, check that it is not already assigned or waiting.
         """
@@ -1154,9 +1155,7 @@ class MPICollectiveWorker(object):
                     "getting next task from queue..."
                 )
             # get next task from queue:
-            name_to_call, args, kwargs, module, time_est, task_id = self.get_next_task(
-                self
-            )
+            name_to_call, args, kwargs, module, time_est, task_id = self.get_next_task()
             if rank == 0:
                 logger.info(
                     f"MPI collective worker {self.worker_id}-{rank}: "
@@ -1200,7 +1199,7 @@ class MPICollectiveWorker(object):
             )
             self.gather_results(result)
 
-    def gather_results(self, result):
+    def gather_results(self, result: Any) -> None:
         if self.collective_mode == CollectiveMode.Gather:
             req = self.merged_comm.Ibarrier()
             self.merged_comm.gather((result, self.stats[-1]), root=0)
@@ -1216,7 +1215,7 @@ class MPICollectiveWorker(object):
                 f"{self.collective_mode}"
             )
 
-    def get_next_task(self):
+    def get_next_task(self) -> Tuple[str, Tuple[Any], Dict[Any, Any], str, int, int]:
         if self.collective_mode == CollectiveMode.Gather:
             req = self.merged_comm.Ibarrier()
             (
@@ -1386,7 +1385,45 @@ class MPICollectiveBroker(object):
             )
             req.wait()
 
-    def gather_results(self, this_result, this_stat):
+    def scatter_task(
+        self,
+        name_to_call: str,
+        args: Tuple[Any],
+        kwargs: Dict[Any, Any],
+        module: str,
+        time_est: int,
+        task_id: int,
+    ) -> None:
+
+        merged_rank = self.merged_comm.Get_rank()
+        merged_size = self.merged_comm.Get_size()
+
+        if self.collective_mode == CollectiveMode.Gather:
+            req = self.merged_comm.Ibarrier()
+            self.merged_comm.scatter(
+                [(name_to_call, args, kwargs, module, time_est, task_id)] * merged_size,
+                root=merged_rank,
+            )
+            req.wait()
+        elif self.collective_mode == CollectiveMode.SendRecv:
+            msg = (name_to_call, args, kwargs, module, time_est, task_id)
+            reqs = []
+            status = []
+            for i in range(self.nprocs_per_worker):
+                req = self.merged_comm.isend(
+                    msg, dest=i if self.is_worker else i + 1, tag=MessageTag.TASK.value
+                )
+                reqs.append(req)
+                status.append(MPI.Status())
+            MPI.Request.waitall(reqs, status)
+        else:
+            raise RuntimeError(
+                f"MPICollectiveBroker: unknown collective mode {self.collective_mode}"
+            )
+
+    def gather_results(
+        self, this_result: Any, this_stat: Any
+    ) -> Tuple[List[Any], List[Dict[str, Union[int, float, float64]]]]:
         merged_rank = self.merged_comm.Get_rank()
         if self.collective_mode == CollectiveMode.Gather:
             req = self.merged_comm.Ibarrier()
@@ -1451,24 +1488,24 @@ class MPICollectiveBroker(object):
 
 
 def do_spawn_workers(
-    fun,
-    fun_name,
-    module_name,
-    world_comm,
-    group_comm,
-    worker_id,
-    n_workers,
-    nprocs_per_worker,
-    broker_is_worker,
-    collective_mode,
-    enable_worker_service,
-    worker_service_name,
-    spawn_args,
-    sequential_spawn,
-    spawn_startup_wait,
-    spawn_executable,
-    verbose,
-):
+    fun: Optional[Callable],
+    fun_name: Optional[str],
+    module_name: Optional[str],
+    world_comm: Intracomm,
+    group_comm: Intracomm,
+    worker_id: int,
+    n_workers: int,
+    nprocs_per_worker: int,
+    broker_is_worker: bool,
+    collective_mode: str,
+    enable_worker_service: bool,
+    worker_service_name: str,
+    spawn_args: List[Any],
+    sequential_spawn: bool,
+    spawn_startup_wait: int,
+    spawn_executable: Optional[str],
+    verbose: bool,
+) -> Tuple[Intercomm, Intracomm, CollectiveMode]:
 
     worker_config = {
         "worker_id": worker_id,
@@ -1527,7 +1564,9 @@ def do_spawn_workers(
     return sub_comm, merged_comm, collective_mode_arg
 
 
-def get_group_comm(world_comm, size, rank, is_controller, spawned):
+def get_group_comm(
+    world_comm: Intracomm, size: int, rank: int, is_controller: bool, spawned: bool
+) -> Tuple[int, Intracomm]:
     group_id = 0
     group_comm = None
     if not spawned and (size > 1):
@@ -1544,7 +1583,7 @@ def get_group_comm(world_comm, size, rank, is_controller, spawned):
     return group_id, group_comm
 
 
-def get_fun(fun_name, module_name):
+def get_fun(fun_name: Optional[str], module_name: str) -> Optional[Callable]:
     fun = None
     if fun_name is not None:
         if module_name not in sys.modules:
@@ -1554,12 +1593,12 @@ def get_fun(fun_name, module_name):
 
 
 def check_spawn_config(
-    spawn_workers,
-    nprocs_per_worker,
-    broker_is_worker,
-    enable_worker_service,
-    broker_fun,
-):
+    spawn_workers: bool,
+    nprocs_per_worker: int,
+    broker_is_worker: bool,
+    enable_worker_service: bool,
+    broker_fun: None,
+) -> None:
 
     if broker_fun is not None:
         if spawn_workers is not True:
@@ -1663,7 +1702,7 @@ def run(
     broker_fun = get_fun(broker_fun_name, module_name)
 
     if has_mpi:  # run in mpi mode
-        spawn_workers = (n_workers > 0) and (nprocs_per_worker > 1)
+        spawn_workers = spawn_workers and (n_workers > 0) and (nprocs_per_worker > 1)
         if is_controller:  # I'm the controller
             assert fun is not None
             controller = MPIController(world_comm, time_limit=time_limit)
