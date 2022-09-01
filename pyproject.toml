@@ -1,9 +1,12 @@
 [tool.poetry]
 name = "distwq"
-version = "1.0.0"
+version = "1.0.1"
 description = "Distributed queue operations with mpi4py"
 authors = ["Ivan Raikov <ivan.g.raikov@gmail.com>"]
-license = "GPL-3"
+license = "GPL-3.0-or-later"
+readme = "README.md"
+repository = "https://github.com/iraikov/distwq"
+keywords = ["MPI", "mpi4py", "distributed-computing", "distributed queue"]
 
 [tool.poetry.dependencies]
 python = "^3.8"
