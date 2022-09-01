@@ -182,7 +182,7 @@ class MPIController(object):
         (set) active_workers contains the ids of workers that have
         communicated with the controller
         """
-        self.n_processed = np.zeros(size).astype(np.int)
+        self.n_processed = np.zeros(size).astype(int)
         """
         (list of ints)
         n_processed[rank] is the total number of calls processed by MPI node rank.
@@ -776,7 +776,7 @@ class MPIController(object):
             return task_id, self.results[task_id]
         elif len(self.task_queue) > 0:
             task_id = self.task_queue[0]
-            return self.get_result(task_id)
+            return task_id, self.get_result(task_id)
         else:
             return None
 
