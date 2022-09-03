@@ -87,8 +87,8 @@ def mpi_excepthook(type, value, traceback):
 
 has_args = "-" in sys.argv
 my_args_start_index = sys.argv.index("-") + 1 if has_args else 0
-my_args = sys.argv[my_args_start_index:] if has_args else None
-my_config = None
+my_args: Optional[List[str]] = sys.argv[my_args_start_index:] if has_args else None
+my_config: Optional[Dict[Any, Any]] = None
 
 # message types
 tag_ctrl_to_worker = 1
@@ -116,11 +116,12 @@ if has_mpi and (size > 1):
     sys_excepthook = sys.excepthook
     sys.excepthook = mpi_excepthook
 
-
 if spawned:
-    my_config = json.loads(my_args[1])
+    my_config = json.loads(my_args[1]) if isinstance(my_args, list) else None
 
-n_workers = size - 1 if not spawned else int(my_config["n_workers"])
+n_workers = (
+    int(my_config["n_workers"]) if spawned and isinstance(my_config, dict) else size - 1
+)
 start_time = time.time()
 
 
@@ -160,12 +161,22 @@ class MPIController(object):
         On worker i, only total_time_est[i] is available.
         """
         self.total_time_est[0] = np.inf
-        self.result_queue = []
-        self.task_queue = []
-        self.wait_queue = []
-        self.waiting = {}
-        self.ready_workers = []
-        self.ready_workers_data = {}
+        self.result_queue: List[int] = []
+        self.task_queue: List[int] = []
+        self.wait_queue: List[int] = []
+        self.waiting: Dict[
+            int,
+            Tuple[
+                str,
+                Union[List[Any], Tuple[Any]],
+                Dict[Any, Any],
+                str,
+                Optional[int],
+                Optional[int],
+            ],
+        ] = {}
+        self.ready_workers: List[int] = []
+        self.ready_workers_data: Dict[int, Any] = {}
         """(list) ids of submitted calls"""
         self.assigned = {}
         """
