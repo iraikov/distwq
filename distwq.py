@@ -1713,7 +1713,7 @@ def run(
     broker_fun = get_fun(broker_fun_name, module_name)
 
     if has_mpi:  # run in mpi mode
-        spawn_workers = spawn_workers and (n_workers > 0) and (nprocs_per_worker > 1)
+        spawn_workers = spawn_workers and (n_workers > 0) and (nprocs_per_worker > 0)
         if is_controller:  # I'm the controller
             assert fun is not None
             controller = MPIController(world_comm, time_limit=time_limit)
