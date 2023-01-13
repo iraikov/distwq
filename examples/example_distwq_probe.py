@@ -50,6 +50,6 @@ if __name__ == "__main__":
         distwq.run(
             fun_name="init",
             module_name="example_distwq_probe",
-            spawn_workers=True,
+            worker_grouping_method="spawn",
             verbose=True,
         )

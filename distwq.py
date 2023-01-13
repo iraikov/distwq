@@ -59,6 +59,12 @@ class MessageTag(IntEnum):
     EXIT = 3
 
 
+class GroupingMethod(IntEnum):
+    NoGrouping = 0
+    GroupSpawn = 1
+    GroupSplit = 2
+
+
 logger = logging.getLogger(__name__)
 
 # try to get the communicator object to see whether mpi is available:
@@ -1243,7 +1249,7 @@ class MPICollectiveWorker(object):
             req = self.merged_comm.irecv(buf, source=0, tag=MessageTag.TASK.value)
             (name_to_call, args, kwargs, module, time_est, task_id) = req.wait()
         else:
-            raise RuntimeError(f"Unknown collective mode {collective_mode}")
+            raise RuntimeError(f"Unknown collective mode {self.collective_mode}")
         return (name_to_call, args, kwargs, module, time_est, task_id)
 
     def abort(self) -> None:
@@ -1575,6 +1581,78 @@ def do_spawn_workers(
     return sub_comm, merged_comm, collective_mode_arg
 
 
+def do_split_workers(
+    fun: Optional[Callable],
+    fun_name: Optional[str],
+    module_name: Optional[str],
+    world_comm: Intracomm,
+    group_comm: Intracomm,
+    worker_id: int,
+    n_workers_arg: int,
+    nprocs_per_worker: int,
+    broker_is_worker: bool,
+    collective_mode: str,
+    is_broker: bool,
+    verbose: bool,
+) -> Tuple[Intracomm, Intracomm, CollectiveMode]:
+
+    worker_config = {
+        "worker_id": worker_id,
+        "n_workers": n_workers,
+        "collective_mode": collective_mode,
+        "enable_worker_service": False,
+        "worker_service_name": None,
+        "verbose": verbose,
+    }
+    if fun is not None:
+        worker_config["init_fun_name"] = str(fun_name)
+        worker_config["init_module_name"] = str(module_name)
+    logger.info(f"MPI broker {worker_id} : before split")
+    group_rank = group_comm.Get_rank()
+    worker_id = (group_rank // nprocs_per_worker) + 1
+    if collective_mode.lower() == "gather":
+        collective_mode_arg = CollectiveMode.Gather
+    elif collective_mode.lower() == "sendrecv":
+        collective_mode_arg = CollectiveMode.SendRecv
+    else:
+        raise RuntimeError(f"Unknown collective mode {collective_mode}")
+
+    broker_rank = None
+    worker_ranks = None
+    if broker_is_worker:
+        worker_ranks = set(
+            range(worker_id * nprocs_per_worker, worker_id + 1 * nprocs_per_worker)
+        )
+    else:
+        broker_rank = (worker_id - 1) * (nprocs_per_worker + 1)
+        worker_ranks = set(
+            range(
+                (worker_id - 1) * (nprocs_per_worker + 1),
+                worker_id * (nprocs_per_worker + 1),
+            )
+        )
+        worker_ranks.remove(broker_rank)
+
+    group = group_comm.Incl(worker_ranks)
+    sub_comm = group_comm.Create_group(group)
+
+    logger.info(f"MPI broker {worker_id} : after split")
+    req = sub_comm.Ibarrier()
+    if broker_is_worker:
+        merged_comm = sub_comm.Dup()
+    else:
+        broker_and_worker_ranks = worker_ranks.union(set([broker_rank]))
+        merged_group = group_comm.Incl(broker_and_worker_ranks)
+        merged_comm = group_comm.Create_group(merged_group)
+    req.wait()
+
+    global my_config
+    my_config = {}
+    my_config.update(worker_config)
+
+    return sub_comm, merged_comm, collective_mode_arg
+
+
 def get_group_comm(
     world_comm: Intracomm, size: int, rank: int, is_controller: bool, spawned: bool
 ) -> Tuple[int, Intracomm]:
@@ -1634,13 +1712,194 @@ def check_spawn_config(
         )
 
 
+def check_split_config(
+    split_workers: bool,
+    nprocs_per_worker: int,
+    broker_is_worker: bool,
+    broker_fun: None,
+    world_size: int,
+) -> None:
+
+    if broker_fun is not None:
+        if split_workers is not True:
+            raise RuntimeError(
+                "distwq.run: cannot use broker_fun_name when "
+                "split_workers is set to False"
+            )
+    if broker_is_worker:
+        raise RuntimeError(
+            "distwq.run: cannot use broker_fun_name when "
+            "broker_is_worker is set to True"
+        )
+    if split_workers and (nprocs_per_worker == 1) and broker_is_worker:
+        raise RuntimeError(
+            "distwq.run: cannot split workers when nprocs_per_worker=1 "
+            "and broker_is_worker is set to True"
+        )
+    if split_workers:
+        if broker_is_worker:
+            if (world_size - 1) % nprocs_per_worker != 0:
+                raise RuntimeError(
+                    "distwq.run: unable to split workers evenly "
+                    f"into groups of {nprocs_per_worker} "
+                    f"when world size is {world_size} "
+                    "(1 process is needed for controller)"
+                )
+        else:
+            if (world_size - 1) % (nprocs_per_worker + 1) != 0:
+                raise RuntimeError(
+                    f"distwq.run: unable to split workers evenly "
+                    f"into groups of {nprocs_per_worker+1} "
+                    f"when world size is {world_size} "
+                    "(1 process is needed for controller; "
+                    "1 process per worker group is needed for brokers)"
+                )
+
+
+def run_spawn_group(
+    worker_id,
+    spawn_workers,
+    nprocs_per_worker,
+    broker_is_worker,
+    broker_fun,
+    fun,
+    fun_name,
+    module_name,
+    args,
+    world_comm,
+    group_comm,
+    n_workers,
+    collective_mode,
+    enable_worker_service,
+    worker_service_name,
+    spawn_args,
+    sequential_spawn,
+    spawn_startup_wait,
+    spawn_executable,
+    verbose,
+):
+
+    check_spawn_config(
+        spawn_workers,
+        nprocs_per_worker,
+        broker_is_worker,
+        enable_worker_service,
+        broker_fun,
+    )
+    sub_comm, merged_comm, collective_mode_arg = do_spawn_workers(
+        fun,
+        fun_name,
+        module_name,
+        world_comm,
+        group_comm,
+        worker_id,
+        n_workers,
+        nprocs_per_worker,
+        broker_is_worker,
+        collective_mode,
+        enable_worker_service,
+        worker_service_name,
+        spawn_args,
+        sequential_spawn,
+        spawn_startup_wait,
+        spawn_executable,
+        verbose,
+    )
+    broker = MPICollectiveBroker(
+        world_comm,
+        group_comm,
+        merged_comm,
+        nprocs_per_worker,
+        is_worker=broker_is_worker,
+        collective_mode=collective_mode_arg,
+    )
+    if fun is not None:
+        req = merged_comm.Ibarrier()
+        merged_comm.bcast(args, root=0)
+        req.wait()
+        if broker_is_worker:
+            fun(broker, *args)
+    if broker_fun is not None:
+        broker_fun(broker, *args)
+    broker.serve()
+
+
+def run_split_group(
+    worker_id,
+    n_workers,
+    split_workers,
+    is_broker,
+    nprocs_per_worker,
+    broker_is_worker,
+    broker_fun,
+    fun,
+    fun_name,
+    module_name,
+    args,
+    world_comm,
+    group_comm,
+    collective_mode,
+    verbose,
+):
+
+    broker = None
+    worker = None
+    check_split_config(
+        split_workers,
+        nprocs_per_worker,
+        broker_is_worker,
+        broker_fun,
+        world_comm.size,
+    )
+    sub_comm, merged_comm, collective_mode_arg = do_split_workers(
+        fun,
+        fun_name,
+        module_name,
+        args,
+        world_comm,
+        group_comm,
+        worker_id,
+        n_workers,
+        nprocs_per_worker,
+        broker_is_worker,
+        collective_mode,
+        is_broker,
+        verbose,
+    )
+    if is_broker:
+        broker = MPICollectiveBroker(
+            world_comm,
+            group_comm,
+            merged_comm,
+            nprocs_per_worker,
+            is_worker=broker_is_worker,
+            collective_mode=collective_mode_arg,
+        )
+    elif is_worker:
+        worker = MPIWorker(world_comm, group_comm)
+    if fun is not None:
+        req = merged_comm.Ibarrier()
+        merged_comm.bcast(args, root=0)
+        req.wait()
+        if is_broker and broker_is_worker:
+            fun(broker, *args)
+        elif is_worker:
+            fun(worker, *args)
+    if is_broker:
+        if broker_fun is not None:
+            broker_fun(broker, *args)
+        broker.serve()
+    else:
+        worker.serve()
+
+
 def run(
     fun_name: Optional[str] = None,
     module_name: str = "__main__",
     broker_fun_name: Optional[str] = None,
     broker_module_name: str = "__main__",
     max_workers: int = -1,
-    spawn_workers: bool = False,
+    worker_grouping_method: Union[str, GroupingMethod] = GroupingMethod.NoGrouping,
     sequential_spawn: bool = False,
     spawn_startup_wait: Optional[int] = None,
     spawn_executable: Optional[str] = None,
@@ -1667,8 +1926,10 @@ def run(
     :arg string module_name: module where fun_name is located
     :arg bool verbose: whether processing information should be printed.
 
-    :arg bool spawn_workers: whether to spawn separate worker
-    processes via MPI_Comm_spawn
+    :arg GroupingMethod worker_grouping_method: specifies grouping method
+    for workers: NoGrouping (default) GroupSpawn (spawn separate
+    worker processes via MPI_Comm_spawn) GroupSplit (split separate
+    worker processes via MPI_Comm_split).
 
     :arg bool sequential_spawn: whether to spawn processes in sequence
 
@@ -1682,12 +1943,13 @@ def run(
 
     :arg int nprocs_per_worker: how many processes per worker
 
-    :arg broker_is_worker: when spawn_worker is True or
-    nprocs_per_worker > 1, MPI_Spawn will be used to create workers,
-    and a CollectiveBroker object is used to relay tasks and results
-    between controller and worker.  When broker_is_worker is true, the
-    broker also participates in serving tasks, otherwise it only
-    relays calls.
+    :arg broker_is_worker: when worker_grouping_method is GroupSpawn
+    or GroupSplit and nprocs_per_worker > 1, MPI_Comm_spawn or
+    MPI_Comm_split will be used to create workers, and a
+    CollectiveBroker object is used to relay tasks and results between
+    controller and worker.  When broker_is_worker is true, the broker
+    also participates in serving tasks, otherwise it only relays
+    calls.
 
     :arg time_limit: maximum wall clock time, in seconds
 
@@ -1700,10 +1962,17 @@ def run(
     assert nprocs_per_worker > 0
     assert not spawned
 
+    if isinstance(worker_grouping_method, str):
+        if worker_grouping_method.lower() == "spawn":
+            worker_grouping_method = GroupingMethod.GroupSpawn
+        elif worker_grouping_method.lower() == "split":
+            worker_grouping_method = GroupingMethod.GroupSplit
+        else:
+            raise RuntimeError(f"Unknown grouping method {worker_grouping_method}")
+
     global n_workers, is_worker
-    if max_workers > 0:
-        n_workers = min(max_workers, n_workers)
-        is_worker = rank < n_workers
+    n_workers = min(max(max_workers, 1), n_workers)
+    is_worker = rank < n_workers
 
     group_id, group_comm = get_group_comm(
         world_comm, size, rank, is_controller, spawned
@@ -1713,7 +1982,16 @@ def run(
     broker_fun = get_fun(broker_fun_name, module_name)
 
     if has_mpi:  # run in mpi mode
-        spawn_workers = spawn_workers and (n_workers > 0) and (nprocs_per_worker > 0)
+        spawn_workers = (
+            (worker_grouping_method == GroupingMethod.GroupSpawn)
+            and (n_workers > 0)
+            and (nprocs_per_worker > 0)
+        )
+        split_workers = (
+            (worker_grouping_method == GroupingMethod.GroupSplit)
+            and (n_workers > 0)
+            and (nprocs_per_worker > 0)
+        )
         if is_controller:  # I'm the controller
             assert fun is not None
             controller = MPIController(world_comm, time_limit=time_limit)
@@ -1727,23 +2005,19 @@ def run(
             controller.exit()
         elif is_worker and spawn_workers:  # I'm a broker
             worker_id = rank
-            check_spawn_config(
+            run_spawn_group(
+                worker_id,
                 spawn_workers,
                 nprocs_per_worker,
                 broker_is_worker,
-                enable_worker_service,
                 broker_fun,
-            )
-            sub_comm, merged_comm, collective_mode_arg = do_spawn_workers(
                 fun,
                 fun_name,
                 module_name,
+                args,
                 world_comm,
                 group_comm,
-                worker_id,
                 n_workers,
-                nprocs_per_worker,
-                broker_is_worker,
                 collective_mode,
                 enable_worker_service,
                 worker_service_name,
@@ -1753,23 +2027,41 @@ def run(
                 spawn_executable,
                 verbose,
             )
-            broker = MPICollectiveBroker(
+        elif is_worker and split_workers:  # I'm a broker or a worker
+            n_workers = (
+                (size - 1) // nprocs_per_worker
+                if broker_is_worker
+                else (size - 1) // (nprocs_per_worker + 1)
+            )
+            worker_id = (
+                (rank - 1) // nprocs_per_worker
+                if broker_is_worker
+                else (rank - 1) // (nprocs_per_worker + 1)
+            )
+            broker_set = (
+                {(x * nprocs_per_worker) + 1 for x in range(n_workers)}
+                if broker_is_worker
+                else {(x * (nprocs_per_worker + 1)) + 1 for x in range(n_workers)}
+            )
+            is_broker = rank in broker_set
+            run_split_group(
+                worker_id,
+                n_workers,
+                split_workers,
+                is_broker,
+                nprocs_per_worker,
+                broker_is_worker,
+                broker_fun,
+                fun,
+                fun_name,
+                module_name,
+                args,
                 world_comm,
                 group_comm,
-                merged_comm,
-                nprocs_per_worker,
-                is_worker=broker_is_worker,
-                collective_mode=collective_mode_arg,
+                collective_mode,
+                verbose,
             )
-            if fun is not None:
-                req = merged_comm.Ibarrier()
-                merged_comm.bcast(args, root=0)
-                req.wait()
-                if broker_is_worker:
-                    fun(broker, *args)
-            if broker_fun is not None:
-                broker_fun(broker, *args)
-            broker.serve()
+
         elif is_worker:  # I'm a worker
             worker_id = rank
             req = world_comm.Ibarrier()
@@ -1789,7 +2081,7 @@ def run(
         logger.info("MPI controller : finished.")
 
 
-if __name__ == "__main__":
+def worker_main():
     if is_worker:
         worker_id = int(my_config["worker_id"])
         logger.info(f"MPI collective worker {worker_id}-{rank} starting")
@@ -1840,6 +2132,10 @@ if __name__ == "__main__":
             req.wait()
             if enable_worker_service:
                 worker.connect_service(n_lookup_attempts=5)
-            ret_val = fun(worker, *args)
+            fun(worker, *args)
         worker.serve()
         MPI.Finalize()
+
+
+if __name__ == "__main__":
+    worker_main()

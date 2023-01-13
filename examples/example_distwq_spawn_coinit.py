@@ -87,7 +87,7 @@ if __name__ == "__main__":
         distwq.run(
             fun_name="main",
             verbose=True,
-            spawn_workers=True,
+            worker_grouping_method="spawn",
             nprocs_per_worker=nprocs_per_worker,
         )
     else:
@@ -96,7 +96,7 @@ if __name__ == "__main__":
             module_name="example_distwq_spawn_coinit",
             broker_fun_name="broker_init",
             broker_module_name="example_distwq_spawn_coinit",
-            spawn_workers=True,
+            worker_grouping_method="spawn",
             nprocs_per_worker=nprocs_per_worker,
             verbose=True,
         )

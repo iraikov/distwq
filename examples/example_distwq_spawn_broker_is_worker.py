@@ -59,14 +59,14 @@ if __name__ == "__main__":
         distwq.run(
             fun_name="main",
             verbose=True,
-            spawn_workers=True,
+            worker_grouping_method="spawn",
             broker_is_worker=True,
             nprocs_per_worker=nprocs_per_worker,
         )
     else:
         distwq.run(
             verbose=True,
-            spawn_workers=True,
+            worker_grouping_method="spawn",
             broker_is_worker=True,
             nprocs_per_worker=nprocs_per_worker,
         )

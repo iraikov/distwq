@@ -60,7 +60,7 @@ if __name__ == "__main__":
         distwq.run(
             fun_name="main",
             verbose=True,
-            spawn_workers=True,
+            worker_grouping_method="spawn",
             nprocs_per_worker=nprocs_per_worker,
         )
     else:
@@ -68,7 +68,7 @@ if __name__ == "__main__":
             fun_name="init",
             module_name="example_distwq_service",
             enable_worker_service=True,
-            spawn_workers=True,
+            worker_grouping_method="spawn",
             nprocs_per_worker=nprocs_per_worker,
             verbose=True,
         )

@@ -260,14 +260,14 @@ run().
 #### run
 
 ```python
-run(fun_name=None, module_name='__main__', verbose=False, spawn_workers=False, nprocs_per_worker=1, broker_is_worker=False, args=())
+run(fun_name=None, module_name='__main__', verbose=False, worker_grouping_method=None, nprocs_per_worker=1, broker_is_worker=False, args=())
 ```
 
 Runs in controller/worker mode until fun(controller/worker) finishes.
 
 Must be called on all MPI nodes.
 
-On the controller, run() calls fun_name() and returns when fun_name() returns.
+On the controller, run() calls fun\_name() and returns when fun\_name() returns.
 
 On each worker, run() calls fun() if that is defined, or calls serve()
 otherwise, and returns when fun() returns, or when fun() returns on
@@ -275,8 +275,7 @@ the controller, or when controller calls exit().
 
 - module\_name (string): module where fun_name is located
 - verbose (bool): whether processing information should be printed.
-- spawn\_workers (bool): whether to spawn separate worker processes via MPI_Spawn
+- worker\_grouping\_method (str): whether to separate worker processes into groups via MPI\_Comm\_Spawn ("spawn") or MPI\_Comm\_Split ("split")
 - nprocs\_per\_worker (int): how many processes per worker
-- broker\_is\_worker (bool): when spawn\_worker is True or nprocs_per_worker > 1, MPI\_Spawn will be used to create workers, and a CollectiveBroker object is used to relay tasks and results between controller and worker. When broker\_is\_worker is true, the broker also participates in serving tasks, otherwise it only relays calls.
+- broker\_is\_worker (bool): when worker\_grouping\_method is "spawn" or "split" and nprocs\_per\_worker > 1, MPI\_Comm\_Spawn or MPI\_Comm\_split will be used to create workers, and a CollectiveBroker object is used to relay tasks and results between controller and worker. When broker\_is\_worker is true, the broker also participates in serving tasks, otherwise it only relays calls.
 - args (tuple): additional args to pass to fun
-

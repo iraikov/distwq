@@ -33,12 +33,10 @@ def test_basic():
             fun_name="main",
             module_name="test_distwq",
             verbose=True,
-            spawn_workers=False,
         )
     else:
         distwq.run(
             fun_name="init",
             module_name="test_distwq",
-            spawn_workers=False,
             verbose=True,
         )

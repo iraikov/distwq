@@ -79,14 +79,14 @@ if __name__ == "__main__":
         distwq.run(
             fun_name="main",
             verbose=True,
-            spawn_workers=True,
+            worker_grouping_method="spawn",
             nprocs_per_worker=nprocs_per_worker,
             collective_mode="sendrecv",
         )
     else:
         distwq.run(
             verbose=True,
-            spawn_workers=True,
+            worker_grouping_method="spawn",
             nprocs_per_worker=nprocs_per_worker,
             collective_mode="sendrecv",
         )
