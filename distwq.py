@@ -1443,10 +1443,11 @@ class MPICollectiveBroker(object):
             msg = (name_to_call, args, kwargs, module, time_est, task_id)
             reqs = []
             status = []
-            for i in range(self.nprocs_per_worker):
-                req = self.merged_comm.isend(
-                    msg, dest=i if self.is_worker else i + 1, tag=MessageTag.TASK.value
-                )
+            for i in range(
+                self.nprocs_per_worker - 1 if self.is_worker else self.nprocs_per_worker
+            ):
+                dest = i + 1 if self.is_worker else i
+                req = self.merged_comm.isend(msg, dest=dest, tag=MessageTag.TASK.value)
                 reqs.append(req)
                 status.append(MPI.Status())
             MPI.Request.waitall(reqs, status)
@@ -1469,11 +1470,14 @@ class MPICollectiveBroker(object):
             stats = [stat for result, stat in sub_data if stat is not None]
         elif self.collective_mode == CollectiveMode.SendRecv:
             reqs = []
-            for i in range(self.nprocs_per_worker):
+            for i in range(
+                self.nprocs_per_worker - 1 if self.is_worker else self.nprocs_per_worker
+            ):
                 buf = bytearray(1 << 20)  # TODO: 1 MB buffer, make it configurable
+                source = i + 1 if self.is_worker else i
                 req = self.merged_comm.irecv(
                     buf,
-                    source=i if self.is_worker else i + 1,
+                    source=source,
                     tag=MessageTag.DONE.value,
                 )
                 reqs.append(req)
