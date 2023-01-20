@@ -409,7 +409,7 @@ class MPIController(object):
             # perform call on this rank if no workers are available:
             worker = 0
             logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} ...")
-
+            object_to_call = None
             try:
                 if module_name not in sys.modules:
                     importlib.import_module(module_name)
@@ -502,7 +502,7 @@ class MPIController(object):
             # perform call on this rank if no workers are available:
             worker = 0
             logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} ...")
-
+            object_to_call = None
             try:
                 if module_name not in sys.modules:
                     importlib.import_module(module_name)
@@ -659,7 +659,7 @@ class MPIController(object):
             # perform call on this rank if no workers are available:
             worker = 0
             logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} ...")
-
+            object_to_call = None
             try:
                 if module_name not in sys.modules:
                     importlib.import_module(module_name)
@@ -1371,12 +1371,11 @@ class MPICollectiveBroker(object):
 
             self.total_time_est[rank] += time_est
             if self.is_worker:
+                object_to_call = None
                 try:
                     if module not in sys.modules:
                         importlib.import_module(module)
-                        object_to_call = eval(
-                            name_to_call, sys.modules[module].__dict__
-                        )
+                    object_to_call = eval(name_to_call, sys.modules[module].__dict__)
                 except NameError:
                     logger.error(str(sys.modules[module].__dict__.keys()))
                     raise
@@ -1678,17 +1677,17 @@ def do_split_workers(
             local_leader, group_comm, remote_leader, tag=0
         )
 
-    if is_broker:
-        logger.info(f"MPI broker {worker_id} : after split")
-    else:
-        logger.info(f"MPI worker {worker_id} (rank {group_comm.rank}) : after split")
-
     if broker_is_worker:
         merged_comm = sub_comm.Dup()
     else:
         req = sub_comm.Ibarrier()
         merged_comm = sub_comm.Merge(False)
         req.wait()
+
+    if is_broker:
+        logger.info(f"MPI broker {worker_id} : after split")
+    else:
+        logger.info(f"MPI worker {worker_id} (rank {group_comm.rank}) : after split")
 
     global my_config
     my_config = {}
