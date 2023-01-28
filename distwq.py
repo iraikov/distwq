@@ -2,7 +2,7 @@
 #
 # Distributed work queue operations using mpi4py.
 #
-# Copyright (C) 2020-2022 Ivan Raikov and distwq authors.
+# Copyright (C) 2020-2023 Ivan Raikov and distwq authors.
 #
 # Based on mpi.py from the pyunicorn project.
 # Copyright (C) 2008--2019 Jonathan F. Donges and pyunicorn authors
@@ -34,6 +34,7 @@ available, otherwise processes calls sequentially in one process.
 import importlib
 import json
 import logging
+import os
 import random
 import signal
 import sys
@@ -96,10 +97,6 @@ my_args_start_index = sys.argv.index("-") + 1 if has_args else 0
 my_args: Optional[List[str]] = sys.argv[my_args_start_index:] if has_args else None
 my_config: Optional[Dict[Any, Any]] = None
 
-# message types
-tag_ctrl_to_worker = 1
-tag_worker_to_ctrl = 2
-
 # initialize:
 workers_available = True
 spawned = False
@@ -107,7 +104,15 @@ if has_mpi:
     spawned = (my_args[0] == "distwq:spawned") if my_args is not None else False
     size = world_comm.size
     rank = world_comm.rank
-    is_controller = (not spawned) and (rank == 0)
+    controller_rank = int(os.environ.get("DISTWQ_CONTROLLER_RANK", "0"))
+    if controller_rank < 0:
+        controller_rank = size - 1
+    if controller_rank >= size:
+        raise RuntimeError(
+            f"Invalid controller rank {controller_rank} specified "
+            f"when world size is {size}"
+        )
+    is_controller = (not spawned) and (rank == controller_rank)
     is_worker = not is_controller
     if size < 2:
         workers_available = False
@@ -963,7 +968,7 @@ class MPIWorker(object):
 
         self.comm = comm
         self.group_comm = group_comm
-        self.worker_id = rank
+        self.worker_id = group_comm.rank + 1
         self.total_time_est = np.zeros(size) * np.nan
         self.total_time_est[rank] = 0
         self.n_processed = np.zeros(size) * np.nan
@@ -1182,11 +1187,11 @@ class MPICollectiveWorker(object):
                 )
             # get next task from queue:
             name_to_call, args, kwargs, module, time_est, task_id = self.get_next_task()
-            if rank == 0:
-                logger.info(
-                    f"MPI collective worker {self.worker_id}-{rank}: "
-                    "received next task from queue."
-                )
+            #            if rank == 0:
+            logger.info(
+                f"MPI collective worker {self.worker_id}-{rank}: "
+                "received next task from queue."
+            )
             # TODO: add timeout and check whether controller lives!
             if name_to_call == "exit":
                 logger.info(
@@ -1446,7 +1451,7 @@ class MPICollectiveBroker(object):
             for i in range(
                 self.nprocs_per_worker - 1 if self.is_worker else self.nprocs_per_worker
             ):
-                dest = i + 1 if self.is_worker else i
+                dest = i + 1
                 req = self.merged_comm.isend(msg, dest=dest, tag=MessageTag.TASK.value)
                 reqs.append(req)
                 status.append(MPI.Status())
@@ -1474,7 +1479,7 @@ class MPICollectiveBroker(object):
                 self.nprocs_per_worker - 1 if self.is_worker else self.nprocs_per_worker
             ):
                 buf = bytearray(1 << 20)  # TODO: 1 MB buffer, make it configurable
-                source = i + 1 if self.is_worker else i
+                source = i + 1
                 req = self.merged_comm.irecv(
                     buf,
                     source=source,
@@ -1566,7 +1571,7 @@ def do_spawn_workers(
     else:
         arglist = spawn_args + ["-c", spawn_stmts]
     logger.info(f"MPI broker {worker_id} : before spawn")
-    worker_id = rank
+    worker_id = group_comm.rank + 1
     if collective_mode.lower() == "gather":
         collective_mode_arg = CollectiveMode.Gather
     elif collective_mode.lower() == "sendrecv":
@@ -1666,6 +1671,7 @@ def do_split_workers(
             worker_id + n_workers if group_rank == this_broker_rank else MPI.UNDEFINED
         )
     )
+
     local_comm = group_comm.Split(color, key=0)
     if is_broker:
         local_leader = 0
@@ -2071,7 +2077,9 @@ def run(
             controller_worker_comm = world_comm
             if split_workers or spawn_workers:
                 color = 1 if is_controller else 2
-                controller_worker_comm = world_comm.Split(color, key=0)
+                controller_worker_comm = world_comm.Split(
+                    color, key=0 if is_controller else 1
+                )
             controller = MPIController(controller_worker_comm, time_limit=time_limit)
             signal.signal(signal.SIGINT, lambda signum, frame: controller.abort())
             req = controller_worker_comm.Ibarrier()
@@ -2082,10 +2090,12 @@ def run(
                 controller.abort()
             controller.exit()
         elif is_worker and spawn_workers:  # I'm a broker
-            worker_id = rank
+            worker_id = group_comm.rank + 1
             is_broker = True
             color = 1 if is_broker or is_controller else 2
-            controller_worker_comm = world_comm.Split(color, key=0)
+            controller_worker_comm = world_comm.Split(
+                color, key=0 if is_controller else 1
+            )
             run_spawn_group(
                 worker_id,
                 spawn_workers,
@@ -2110,19 +2120,18 @@ def run(
             )
         elif is_worker and split_workers:  # I'm a broker or a worker
             if broker_is_worker:
-                n_workers = (size - 1) // nprocs_per_worker
-                worker_id = ((rank - 1) // nprocs_per_worker) + 1
-                broker_set = {(x * nprocs_per_worker) + 1 for x in range(n_workers)}
+                n_workers = group_comm.size // nprocs_per_worker
+                worker_id = (group_comm.rank // nprocs_per_worker) + 1
+                broker_set = {(x * nprocs_per_worker) for x in range(n_workers)}
             else:
-                n_workers = (size - 1) // (nprocs_per_worker + 1)
-                worker_id = ((rank - 1) // (nprocs_per_worker + 1)) + 1
-                broker_set = {
-                    (x * (nprocs_per_worker + 1)) + 1 for x in range(n_workers)
-                }
-
-            is_broker = rank in broker_set
+                n_workers = group_comm.size // (nprocs_per_worker + 1)
+                worker_id = (group_comm.rank // (nprocs_per_worker + 1)) + 1
+                broker_set = {(x * (nprocs_per_worker + 1)) for x in range(n_workers)}
+            is_broker = group_comm.rank in broker_set
             color = 1 if is_broker or is_controller else 2
-            controller_worker_comm = world_comm.Split(color, key=0)
+            controller_worker_comm = world_comm.Split(
+                color, key=0 if is_controller else 1
+            )
             run_split_group(
                 worker_id,
                 n_workers,
