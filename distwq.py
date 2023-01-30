@@ -1796,11 +1796,6 @@ def check_split_config(
                 "distwq.run: cannot use broker_fun_name when "
                 "broker_is_worker is set to True"
             )
-    if split_workers and (nprocs_per_worker == 1) and broker_is_worker:
-        raise RuntimeError(
-            "distwq.run: cannot split workers when nprocs_per_worker=1 "
-            "and broker_is_worker is set to True"
-        )
     if split_workers:
         if broker_is_worker:
             if (world_size - 1) % nprocs_per_worker != 0:
