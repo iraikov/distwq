@@ -1672,7 +1672,7 @@ def do_split_workers(
         )
     )
 
-    local_comm = group_comm.Split(color, key=0)
+    local_comm = group_comm.Split(color, key=group_comm.rank)
     if is_broker:
         local_leader = 0
         remote_leader = tuple(this_worker_ranks)[0]
@@ -1718,7 +1718,7 @@ def get_group_comm(
             group_id = 1
         else:
             group_id = 3
-        group_comm = world_comm.Split(group_id, rank)
+        group_comm = world_comm.Split(group_id, key=rank)
     else:
         group_comm = world_comm
 
