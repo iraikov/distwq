@@ -66,9 +66,7 @@ def mkcells(pc, ngids):
     assert nranks <= ngids
 
     for gid in range(ngids):
-
         if gid % nranks == myrank:
-
             cell = MyCell()
             nc = h.NetCon(cell.soma(0.5)._ref_v, None, sec=cell.soma)
             pc.set_gid2node(gid, myrank)
@@ -99,9 +97,7 @@ def mkcells(pc, ngids):
 
 # Creates connections:
 def connectcells(pc, ngids):
-
     for gid in range(0, ngids, 2):
-
         # source gid: all even gids
         src = gid
         # destination gid: all odd gids
@@ -118,7 +114,6 @@ def connectcells(pc, ngids):
 
 
 def do_work(i):
-
     pc = h.ParallelContext()
     pc.gid_clear()
     myrank = int(pc.id())

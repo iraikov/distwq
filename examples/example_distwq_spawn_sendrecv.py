@@ -42,7 +42,6 @@ def init(worker):
 
 
 def broker_init(broker):
-
     data = None
     if broker.worker_id == 1:
         status = MPI.Status()
@@ -63,7 +62,6 @@ def broker_init(broker):
 
 
 def main(controller):
-
     n = 5
     for i in range(0, n):
         controller.submit_call("do_work", (i + 1,), module_name="example_distwq")

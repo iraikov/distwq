@@ -28,7 +28,6 @@ def init(worker):
 
 
 def main(controller):
-
     n = 5
     for i in range(0, n):
         controller.submit_call("do_work", (i + 1,), module_name="example_distwq")

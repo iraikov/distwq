@@ -154,7 +154,6 @@ def multiple_task_arguments(N, args, kwargs, task_ids, workers):
 
 class MPIController(object):
     def __init__(self, comm: Intracomm, time_limit: Any = None) -> None:
-
         size = comm.size
 
         self.comm = comm
@@ -244,7 +243,6 @@ class MPIController(object):
             return
         count = 0
         while self.comm.Iprobe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG):
-
             if (limit is not None) and (limit < count):
                 break
 
@@ -962,7 +960,6 @@ class MPIWorker(object):
     def __init__(
         self, comm: Intracomm, group_comm: Intracomm, ready_data: Optional[Any] = None
     ) -> None:
-
         size = comm.size
         rank = comm.rank
 
@@ -1078,7 +1075,6 @@ class MPICollectiveWorker(object):
         worker_service_name: str = "distwq.init",
         collective_mode: CollectiveMode = CollectiveMode.Gather,
     ):
-
         size = comm.size
         rank = comm.rank
 
@@ -1285,7 +1281,6 @@ class MPICollectiveBroker(object):
         is_worker: bool = False,
         collective_mode: CollectiveMode = CollectiveMode.Gather,
     ) -> None:
-
         logger.info(f"MPI collective broker {worker_id} starting")
         assert not spawned
 
@@ -1433,7 +1428,6 @@ class MPICollectiveBroker(object):
         time_est: int,
         task_id: int,
     ) -> None:
-
         merged_rank = self.merged_comm.Get_rank()
         merged_size = self.merged_comm.Get_size()
 
@@ -1549,7 +1543,6 @@ def do_spawn_workers(
     spawn_executable: Optional[str],
     verbose: bool,
 ) -> Tuple[Intercomm, Intracomm, CollectiveMode]:
-
     worker_config = {
         "worker_id": worker_id,
         "n_workers": n_workers,
@@ -1622,7 +1615,6 @@ def do_split_workers(
     broker_ranks: Tuple[int],
     verbose: bool,
 ) -> Tuple[Intracomm, Intracomm, CollectiveMode]:
-
     worker_config = {
         "worker_id": worker_id,
         "n_workers": n_workers,
@@ -1753,7 +1745,6 @@ def check_spawn_config(
     enable_worker_service: bool,
     broker_fun: None,
 ) -> None:
-
     if broker_fun is not None:
         if spawn_workers is not True:
             raise RuntimeError(
@@ -1784,7 +1775,6 @@ def check_split_config(
     broker_fun: None,
     world_size: int,
 ) -> None:
-
     if broker_fun is not None:
         if split_workers is not True:
             raise RuntimeError(
@@ -1838,7 +1828,6 @@ def run_spawn_group(
     spawn_executable,
     verbose,
 ):
-
     check_spawn_config(
         spawn_workers,
         nprocs_per_worker,
@@ -1904,7 +1893,6 @@ def run_split_group(
     collective_mode,
     verbose,
 ):
-
     broker = None
     worker = None
     check_split_config(

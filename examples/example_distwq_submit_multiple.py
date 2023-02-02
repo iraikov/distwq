@@ -28,7 +28,6 @@ def init(worker):
 
 
 def main(controller):
-
     n = 10
     args = list(([i + 1] for i in range(n)))
     controller.submit_multiple(
