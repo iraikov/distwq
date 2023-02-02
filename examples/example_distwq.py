@@ -41,11 +41,10 @@ def main(controller):
 
 if __name__ == "__main__":
     if distwq.is_controller:
-        distwq.run(fun_name="main", verbose=True, spawn_workers=False)
+        distwq.run(fun_name="main", verbose=True)
     else:
         distwq.run(
             fun_name="init",
             module_name="example_distwq",
-            spawn_workers=False,
             verbose=True,
         )

@@ -33,13 +33,11 @@ def test_basic():
             fun_name="main",
             module_name="test_distwq",
             verbose=True,
-            spawn_workers=False,
         )
     else:
         distwq.run(
             fun_name="init",
             module_name="test_distwq",
-            spawn_workers=False,
             verbose=True,
         )
 
@@ -50,12 +48,29 @@ def test_spawn():
             fun_name="main",
             module_name="test_distwq",
             verbose=True,
-            spawn_workers=True,
+            worker_grouping_method="spawn",
         )
     else:
         distwq.run(
             fun_name="init",
             module_name="test_distwq",
-            spawn_workers=True,
+            worker_grouping_method="spawn",
+            verbose=True,
+        )
+
+
+def test_split():
+    if distwq.is_controller:
+        distwq.run(
+            fun_name="main",
+            module_name="test_distwq",
+            verbose=True,
+            worker_grouping_method="split",
+        )
+    else:
+        distwq.run(
+            fun_name="init",
+            module_name="test_distwq",
+            worker_grouping_method="split",
             verbose=True,
         )

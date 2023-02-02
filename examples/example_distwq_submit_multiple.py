@@ -48,6 +48,5 @@ if __name__ == "__main__":
         distwq.run(
             fun_name="init",
             module_name="example_distwq_submit_multiple",
-            spawn_workers=False,
             verbose=True,
         )
