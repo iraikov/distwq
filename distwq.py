@@ -1751,11 +1751,11 @@ def check_spawn_config(
                 "distwq.run: cannot use broker_fun_name when "
                 "spawn_workers is set to False"
             )
-    if broker_is_worker:
-        raise RuntimeError(
-            "distwq.run: cannot use broker_fun_name when "
-            "broker_is_worker is set to True"
-        )
+        if broker_is_worker:
+            raise RuntimeError(
+                "distwq.run: cannot use broker_fun_name when "
+                "broker_is_worker is set to True"
+            )
     if spawn_workers and (nprocs_per_worker == 1) and broker_is_worker:
         raise RuntimeError(
             "distwq.run: cannot spawn workers when nprocs_per_worker=1 "
