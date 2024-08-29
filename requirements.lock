@@ -12,5 +12,5 @@
 -e file:.
 mpi4py==4.0.0
     # via distwq
-numpy==2.1.0
+numpy==1.26.4
     # via distwq

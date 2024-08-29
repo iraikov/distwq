@@ -10,7 +10,7 @@ repository = "https://github.com/iraikov/distwq"
 keywords = ["MPI", "mpi4py", "distributed computing", "distributed queue"]
 dependencies = [
     "mpi4py>=4.0.0",
-    "numpy>=2.1.0",
+    "numpy<2",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"
