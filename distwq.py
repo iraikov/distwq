@@ -756,7 +756,7 @@ class MPIController(object):
                 f"from worker {source} ..."
             )
 
-            while not (task_id in self.results):
+            while task_id not in self.results:
                 self.process()
 
             logger.info(
