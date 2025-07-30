@@ -595,7 +595,7 @@ class MPIController(object):
         self,
         name_to_call: str,
         args: List[List[Any]] = [],
-        kwargs: Dict[Any, Any] = {},
+        kwargs: List[Dict[Any, Any]] = [],
         module_name: str = "__main__",
         time_est: int = 1,
         task_ids: Optional[int] = None,
@@ -636,9 +636,9 @@ class MPIController(object):
 
         """
         if len(kwargs) > 0:
-            assert len(args) == len(kwargs)
+            assert (len(args) == 0) or (len(args) == len(kwargs))
         submitted_task_ids = []
-        N = len(args)
+        N = len(args) if (len(args) > 0) else len(kwargs)
         if self.workers_available:
             self.process()
             args, kwargs, task_ids, workers = multiple_task_arguments(
@@ -668,7 +668,10 @@ class MPIController(object):
                     importlib.import_module(module_name)
                 object_to_call = eval(name_to_call, sys.modules[module_name].__dict__)
             except NameError:
-                logger.error(str(sys.modules[module_name].__dict__.keys()))
+                logger.error(
+                    f"MPI controller : Unable to import {name_to_call}; "
+                    f"module environment is {sys.modules[module_name].__dict__.keys()}"
+                )
                 raise
             args, kwargs, task_ids, workers = multiple_task_arguments(
                 N, args, kwargs, task_ids, workers
@@ -766,7 +769,7 @@ class MPIController(object):
 
         else:
             logger.info(
-                f"MPI controller : returning result for call with id {task_id} " "..."
+                f"MPI controller : returning result for call with id {task_id} ..."
             )
         result = self.results[task_id]
         self.result_queue.remove(task_id)
@@ -929,7 +932,7 @@ class MPIController(object):
             # tell workers to exit:
             reqs = []
             for worker in self.active_workers:
-                logger.info(f"MPI controller : telling worker {worker} " "to exit...")
+                logger.info(f"MPI controller : telling worker {worker} to exit...")
                 reqs.append(
                     self.comm.isend(None, dest=worker, tag=MessageTag.EXIT.value)
                 )
@@ -1100,6 +1103,7 @@ class MPICollectiveWorker(object):
         self.total_time = np.zeros(size) * np.nan
         self.total_time[rank] = 0
         self.stats = []
+        logger.info(f"MPI collective worker {self.worker_id}: initialized.")
 
     def publish_service(self) -> None:
         if not self.service_published:
@@ -1211,6 +1215,7 @@ class MPICollectiveWorker(object):
                 raise
             self.total_time_est[rank] += time_est
             call_time = time.time()
+
             result = object_to_call(*args, **kwargs)
             this_time = time.time() - call_time
             self.n_processed[rank] += 1
@@ -1238,8 +1243,7 @@ class MPICollectiveWorker(object):
             req.wait()
         else:
             raise RuntimeError(
-                "MPICollectiveWorker: unknown collective mode "
-                f"{self.collective_mode}"
+                f"MPICollectiveWorker: unknown collective mode {self.collective_mode}"
             )
 
     def get_next_task(self) -> Tuple[str, Tuple[Any], Dict[Any, Any], str, int, int]:
@@ -1307,6 +1311,7 @@ class MPICollectiveBroker(object):
         self.is_worker = is_worker
         self.is_broker = True
         self.ready_data = ready_data
+        logger.info(f"MPI collective broker {self.worker_id}: initialized.")
 
     def serve(self) -> None:
         """
@@ -1328,17 +1333,17 @@ class MPICollectiveBroker(object):
         rank = self.comm.rank
         merged_rank = self.merged_comm.Get_rank()
 
-        logger.info(f"MPI worker broker {self.worker_id}: waiting for calls.")
+        logger.info(f"MPI collective broker {self.worker_id}: waiting for calls.")
 
         # wait for orders:
         while True:
+            # signal the controller this worker is ready
+            req = self.comm.isend(self.ready_data, dest=0, tag=MessageTag.READY.value)
+            req.wait()
             logger.info(
                 f"MPI collective broker {self.worker_id}: "
                 "getting next task from controller..."
             )
-            # signal the controller this worker is ready
-            req = self.comm.isend(self.ready_data, dest=0, tag=MessageTag.READY.value)
-            req.wait()
 
             while True:
                 msg = self.process()
@@ -1352,7 +1357,7 @@ class MPICollectiveBroker(object):
             )
 
             if tag == MessageTag.EXIT.value:
-                logger.info(f"MPI worker broker {self.worker_id}: exiting...")
+                logger.info(f"MPI collective broker {self.worker_id}: exiting...")
                 self.scatter_task("exit", (), {}, "", 0, 0)
                 break
             elif tag == MessageTag.TASK.value:
@@ -1381,7 +1386,15 @@ class MPICollectiveBroker(object):
                     raise
 
                 call_time = time.time()
-                this_result = object_to_call(*args, **kwargs)
+                try:
+                    this_result = object_to_call(*args, **kwargs)
+                except Exception as e:
+                    logger.error(
+                        f"MPI collective broker {self.worker_id}: "
+                        f"call to {name_to_call} failed with error: {e}"
+                    )
+                    raise
+
                 this_time = time.time() - call_time
                 self.n_processed[merged_rank] += 1
                 this_stat = {
@@ -1494,8 +1507,7 @@ class MPICollectiveBroker(object):
                 stats = [this_stat] + stats
         else:
             raise RuntimeError(
-                "MPICollectiveBroker: unknown collective mode "
-                f"{self.collective_mode}"
+                f"MPICollectiveBroker: unknown collective mode {self.collective_mode}"
             )
         return results, stats
 
@@ -1520,7 +1532,7 @@ class MPICollectiveBroker(object):
     def abort(self):
         rank = self.comm.rank
         traceback.print_exc()
-        logger.info(f"MPI worker broker {rank}: aborting...")
+        logger.info(f"MPI collective broker {rank}: aborting...")
         self.comm.Abort()
 
 
@@ -1799,7 +1811,7 @@ def check_split_config(
             if (world_size - 1) % (nprocs_per_worker + 1) != 0:
                 raise RuntimeError(
                     f"distwq.run: unable to split workers evenly "
-                    f"into groups of {nprocs_per_worker+1} "
+                    f"into groups of {nprocs_per_worker + 1} "
                     f"when world size is {world_size} "
                     "(1 process is needed for controller; "
                     "1 process per worker group is needed for brokers)"
@@ -2035,6 +2047,7 @@ def run(
     fun = get_fun(fun_name, module_name)
     broker_fun = get_fun(broker_fun_name, module_name)
 
+    results = None
     if has_mpi:  # run in mpi mode
         spawn_workers = (
             (worker_grouping_method == GroupingMethod.GroupSpawn)
@@ -2068,7 +2081,7 @@ def run(
             req = controller_worker_comm.Ibarrier()
             req.wait()
             try:  # put everything in a try block to be able to exit!
-                fun(controller, *args)
+                results = fun(controller, *args)
             except ValueError:
                 controller.abort()
             controller.exit()
@@ -2151,8 +2164,9 @@ def run(
         assert fun is not None
         logger.info("MPI controller : not available, running as a single process.")
         controller = MPIController()
-        fun(controller, *args)
+        results = fun(controller, *args)
         logger.info("MPI controller : finished.")
+    return results
 
 
 def worker_main():
