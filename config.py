@@ -1,8 +1,19 @@
 # Hierarchical Configuration Design
 
+import sys
+import importlib
 from dataclasses import dataclass, replace
 from typing import Optional, Callable
 from enum import Enum
+
+
+def import_object_by_path(path):
+    module_path, _, obj_name = path.rpartition(".")
+    if module_path == "__main__" or module_path == "":
+        module = sys.modules["__main__"]
+    else:
+        module = importlib.import_module(module_path)
+    return getattr(module, obj_name)
 
 
 class SpawnMethod(Enum):
@@ -66,15 +77,15 @@ class MPIConfig:
 
 
 @dataclass(frozen=True)
-class DebugConfig:
-    """Debugging and development configuration"""
+class LoggingConfig:
+    """Logging and development configuration"""
 
     verbose: bool = False
     profile: bool = False
     log_level: str = "INFO"
     stats_callback: Optional[Callable] = None
 
-    def with_verbose(self, enabled: bool = True) -> "DebugConfig":
+    def with_verbose(self, enabled: bool = True) -> "LoggingConfig":
         return replace(self, verbose=enabled)
 
 
@@ -85,7 +96,7 @@ class Config:
     resources: ResourceConfig = ResourceConfig()
     execution: ExecutionConfig = ExecutionConfig()
     mpi: MPIConfig = MPIConfig()
-    debug: DebugConfig = DebugConfig()
+    logging: LoggingConfig = LoggingConfig()
 
     # Convenience methods for common operations
     def with_workers(self, n: int) -> "Config":
@@ -104,7 +115,7 @@ class Config:
         return cls(
             resources=ResourceConfig(max_workers=2),
             execution=ExecutionConfig(fail_fast=True),
-            debug=DebugConfig(verbose=True, log_level="DEBUG"),
+            debug=LoggingConfig(verbose=True, log_level="DEBUG"),
         )
 
     @classmethod
@@ -113,5 +124,5 @@ class Config:
         return cls(
             resources=ResourceConfig(max_workers=workers),
             execution=ExecutionConfig(retry_attempts=3, fail_fast=False),
-            debug=DebugConfig(verbose=False, log_level="WARN"),
+            debug=LoggingConfig(verbose=False, log_level="WARN"),
         )
