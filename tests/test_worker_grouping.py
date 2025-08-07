@@ -189,9 +189,7 @@ def test_mixed_workload():
             group_futures = []
             if worker_config.grouping_method != GroupingMethod.NoGrouping:
                 for i in range(2):
-                    future = executor.submit_to_group(
-                        collective_matrix_multiply, 8 + i * 2
-                    )
+                    future = executor.submit(collective_matrix_multiply, 8 + i * 2)
                     group_futures.append(future)
 
             # Process all results
