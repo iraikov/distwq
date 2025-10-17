@@ -77,12 +77,14 @@ if __name__ == "__main__":
         distwq.run(
             fun_name="main",
             verbose=True,
+            broker_is_worker=True,
             worker_grouping_method="split",
             nprocs_per_worker=nprocs_per_worker,
         )
     else:
         distwq.run(
             verbose=True,
+            broker_is_worker=True,
             worker_grouping_method="split",
             nprocs_per_worker=nprocs_per_worker,
         )
