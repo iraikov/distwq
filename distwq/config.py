@@ -5,10 +5,26 @@ import importlib
 from dataclasses import dataclass, replace
 from typing import Optional, Callable, Union, Any, List
 from enum import Enum
+
 try:
-    from .mpi import GroupingMethod, CollectiveMode, has_mpi, world_comm, check_spawn_config, check_split_config
+    from .mpi import (
+        GroupingMethod,
+        CollectiveMode,
+        has_mpi,
+        world_comm,
+        check_spawn_config,
+        check_split_config,
+    )
 except ImportError:
-    from mpi import GroupingMethod, CollectiveMode, has_mpi, world_comm, check_spawn_config, check_split_config
+    from mpi import (
+        GroupingMethod,
+        CollectiveMode,
+        has_mpi,
+        world_comm,
+        check_spawn_config,
+        check_split_config,
+    )
+
 
 def import_object_by_path(path):
     module_path, _, obj_name = path.rpartition(".")
@@ -148,13 +164,14 @@ class WorkerGroupConfig:
                     world_size=world_comm.size if world_comm else 1,
                 )
 
+
 @dataclass(frozen=True)
 class Config:
     """Main configuration object"""
 
     resources: ResourceConfig = ResourceConfig()
     execution: ExecutionConfig = ExecutionConfig()
-    grouping:  WorkerGroupConfig = WorkerGroupConfig()
+    grouping: WorkerGroupConfig = WorkerGroupConfig()
     mpi: MPIConfig = MPIConfig()
     logging: LoggingConfig = LoggingConfig()
 

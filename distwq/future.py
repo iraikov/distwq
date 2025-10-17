@@ -1,6 +1,5 @@
 # Future-based distributed task management with Two-Phase Iterator design
 
-import sys
 import time
 import threading
 import logging
@@ -16,7 +15,6 @@ from typing import (
     Dict,
     Any,
     Optional,
-    Union,
 )
 
 # Import from mpi.py to access MPI functionality
@@ -52,8 +50,6 @@ except ImportError:
         run_spawn_group,
         run_split_group,
         get_group_comm,
-        check_spawn_config,
-        check_split_config,
     )
 
 # Import config if available, otherwise provide basic fallback
@@ -66,33 +62,53 @@ except ImportError:
         # Fallback config implementation
         class Config:
             def __init__(self):
-                self.resources = type('ResourceConfig', (), {'max_workers': -1})()
-                self.execution = type('ExecutionConfig', (), {
-                    'timeout': None, 'task_timeout': None, 'retry_attempts': 0, 'fail_fast': True
-                })()
-                self.logging = type('LoggingConfig', (), {'verbose': False, 'log_level': 'INFO'})()
-                self.mpi = type('MPIConfig', (), {
-                    'collective_mode': 'gather', 'broker_is_worker': False
-                })()
-        
+                self.resources = type("ResourceConfig", (), {"max_workers": -1})()
+                self.execution = type(
+                    "ExecutionConfig",
+                    (),
+                    {
+                        "timeout": None,
+                        "task_timeout": None,
+                        "retry_attempts": 0,
+                        "fail_fast": True,
+                    },
+                )()
+                self.logging = type(
+                    "LoggingConfig", (), {"verbose": False, "log_level": "INFO"}
+                )()
+                self.mpi = type(
+                    "MPIConfig",
+                    (),
+                    {"collective_mode": "gather", "broker_is_worker": False},
+                )()
+
         class WorkerGroupConfig:
-            def __init__(self, grouping_method=None, nprocs_per_worker=1, broker_is_worker=False, **kwargs):
+            def __init__(
+                self,
+                grouping_method=None,
+                nprocs_per_worker=1,
+                broker_is_worker=False,
+                **kwargs,
+            ):
                 self.grouping_method = grouping_method or GroupingMethod.NoGrouping
                 self.nprocs_per_worker = nprocs_per_worker
                 self.broker_is_worker = broker_is_worker
-                self.collective_mode = kwargs.get('collective_mode', 'gather')
-                self.enable_worker_service = kwargs.get('enable_worker_service', False)
-                self.worker_service_name = kwargs.get('worker_service_name', 'distwq.init')
-                self.sequential_spawn = kwargs.get('sequential_spawn', False)
-                self.spawn_startup_wait = kwargs.get('spawn_startup_wait', None)
-                self.spawn_executable = kwargs.get('spawn_executable', None)
-                self.spawn_args = kwargs.get('spawn_args', [])
+                self.collective_mode = kwargs.get("collective_mode", "gather")
+                self.enable_worker_service = kwargs.get("enable_worker_service", False)
+                self.worker_service_name = kwargs.get(
+                    "worker_service_name", "distwq.init"
+                )
+                self.sequential_spawn = kwargs.get("sequential_spawn", False)
+                self.spawn_startup_wait = kwargs.get("spawn_startup_wait", None)
+                self.spawn_executable = kwargs.get("spawn_executable", None)
+                self.spawn_args = kwargs.get("spawn_args", [])
 
 
 T = TypeVar("T")
 R = TypeVar("R")
 
 logger = logging.getLogger(__name__)
+
 
 class DistributedFuture(Future, Generic[R]):
     """Enhanced Future with distributed computing features and progress monitoring"""
@@ -131,8 +147,10 @@ class TaskController:
 
     def __init__(self, execution_context: "DistributedEnvironment"):
         if not is_controller:
-            raise RuntimeError("TaskController can only be instantiated on controller rank")
-        
+            raise RuntimeError(
+                "TaskController can only be instantiated on controller rank"
+            )
+
         self._env = execution_context
         self._controller = execution_context._controller
         self._pending_futures = {}  # Map task_id to future for completion tracking
@@ -143,16 +161,16 @@ class TaskController:
         # Start monitoring thread for futures completion
         self._start_monitoring_thread()
 
-    def submit(self, func: Callable[..., R], *args, timeout: Optional[int] = None, **kwargs) -> DistributedFuture[R]:
+    def submit(
+        self, func: Callable[..., R], *args, timeout: Optional[int] = None, **kwargs
+    ) -> DistributedFuture[R]:
         """Submit a single task for distributed execution"""
         if not self._controller:
             raise RuntimeError("No controller available for task submission")
 
         # Determine effective worker group size
         effective_group_size = (
-            self._env.worker_config.nprocs_per_worker 
-            if self._env.worker_config 
-            else 1
+            self._env.worker_config.nprocs_per_worker if self._env.worker_config else 1
         )
 
         task_id = self._controller.submit_call(
@@ -163,7 +181,7 @@ class TaskController:
             time_est=self._estimate_task_time(func, args, kwargs),
         )
         logger.info(f"Submitted task id {task_id}")
-        
+
         future = DistributedFuture(
             task_id, self, worker_group_size=effective_group_size
         )
@@ -226,7 +244,7 @@ class TaskController:
 
     def active_worker_count(self) -> int:
         """Get the number of active workers"""
-        if self._controller and hasattr(self._controller, 'n_workers'):
+        if self._controller and hasattr(self._controller, "n_workers"):
             return self._controller.n_workers
         return 0
 
@@ -287,19 +305,24 @@ class TaskController:
             return None
 
         # Check if task is assigned
-        if hasattr(self._controller, 'assigned') and task_id in self._controller.assigned:
+        if (
+            hasattr(self._controller, "assigned")
+            and task_id in self._controller.assigned
+        ):
             worker_id = self._controller.assigned[task_id]
             info = {
                 "worker_id": worker_id,
                 "worker_rank": worker_id,
                 "n_processed": (
                     self._controller.n_processed[worker_id]
-                    if hasattr(self._controller, 'n_processed') and worker_id < len(self._controller.n_processed)
+                    if hasattr(self._controller, "n_processed")
+                    and worker_id < len(self._controller.n_processed)
                     else 0
                 ),
                 "total_time": (
                     self._controller.total_time[worker_id]
-                    if hasattr(self._controller, 'total_time') and worker_id < len(self._controller.total_time)
+                    if hasattr(self._controller, "total_time")
+                    and worker_id < len(self._controller.total_time)
                     else 0.0
                 ),
                 "is_group_worker": (
@@ -344,13 +367,13 @@ class DistributedEnvironment:
     """Distributed computing environment that coordinates MPI setup and task execution"""
 
     def __init__(
-        self, 
-        config: Optional[Config] = None, 
-        worker_config: Optional[WorkerGroupConfig] = None
+        self,
+        config: Optional[Config] = None,
+        worker_config: Optional[WorkerGroupConfig] = None,
     ):
         self.config = config or Config()
         self.worker_config = worker_config
-        
+
         self._controller = None
         self._worker = None
         self._active = False
@@ -362,7 +385,7 @@ class DistributedEnvironment:
         self._worker_id = None
 
         self.exit_timeout = 2.0
-        
+
     def __enter__(self) -> "DistributedEnvironment":
         """Set up distributed environment - ALL ranks participate"""
         self._setup_environment()
@@ -380,9 +403,10 @@ class DistributedEnvironment:
             yield TaskController(self)
         else:
             return iter([])
-#        elif is_worker and self._worker is not None:
-#            self._worker.serve()  # Workers block here
-#            return iter([])
+
+    #        elif is_worker and self._worker is not None:
+    #            self._worker.serve()  # Workers block here
+    #            return iter([])
 
     def is_active(self) -> bool:
         """Check if the distributed environment is active"""
@@ -398,11 +422,7 @@ class DistributedEnvironment:
     @property
     def total_cores(self) -> int:
         """Get the total number of cores available"""
-        worker_cores = (
-            self.worker_config.nprocs_per_worker 
-            if self.worker_config 
-            else 1
-        )
+        worker_cores = self.worker_config.nprocs_per_worker if self.worker_config else 1
         return self.worker_count * worker_cores
 
     def _setup_environment(self):
@@ -410,7 +430,9 @@ class DistributedEnvironment:
         if self._active:
             return
 
-        logger.info(f"Setting up distributed environment: is_controller={is_controller}, is_worker={is_worker}")
+        logger.info(
+            f"Setting up distributed environment: is_controller={is_controller}, is_worker={is_worker}"
+        )
 
         # All ranks participate in MPI collective setup
         if has_mpi:
@@ -436,9 +458,15 @@ class DistributedEnvironment:
         if not has_mpi:
             return
 
-        if self.worker_config and self.worker_config.grouping_method == GroupingMethod.GroupSpawn:
+        if (
+            self.worker_config
+            and self.worker_config.grouping_method == GroupingMethod.GroupSpawn
+        ):
             self._setup_spawn_groups()
-        elif self.worker_config and self.worker_config.grouping_method == GroupingMethod.GroupSplit:
+        elif (
+            self.worker_config
+            and self.worker_config.grouping_method == GroupingMethod.GroupSplit
+        ):
             self._setup_split_groups()
         else:
             # Regular worker setup
@@ -488,12 +516,15 @@ class DistributedEnvironment:
                 (x * self.worker_config.nprocs_per_worker) for x in range(n_workers)
             }
         else:
-            n_workers = self._group_comm.size // (self.worker_config.nprocs_per_worker + 1)
+            n_workers = self._group_comm.size // (
+                self.worker_config.nprocs_per_worker + 1
+            )
             self._worker_id = (
                 self._group_comm.rank // (self.worker_config.nprocs_per_worker + 1)
             ) + 1
             broker_set = {
-                (x * (self.worker_config.nprocs_per_worker + 1)) for x in range(n_workers)
+                (x * (self.worker_config.nprocs_per_worker + 1))
+                for x in range(n_workers)
             }
 
         self._is_broker = self._group_comm.rank in broker_set
@@ -506,7 +537,7 @@ class DistributedEnvironment:
         split_thread = threading.Thread(
             target=self._run_split_group,
             args=(controller_worker_comm, broker_set, n_workers),
-            daemon = True
+            daemon=True,
         )
         split_thread.start()
         self._worker_threads.append(split_thread)
@@ -561,13 +592,14 @@ class DistributedEnvironment:
     def _create_controller(self):
         """Create controller instance"""
         if not is_controller:
-            raise RuntimeError("_create_controller() can only be called by controller rank")
+            raise RuntimeError(
+                "_create_controller() can only be called by controller rank"
+            )
 
         if not has_mpi:
             # Single process mode
             return MPIController(
-                world_comm, 
-                time_limit=getattr(self.config.execution, "timeout", None)
+                world_comm, time_limit=getattr(self.config.execution, "timeout", None)
             )
 
         # MPI mode with potential worker grouping
@@ -575,16 +607,16 @@ class DistributedEnvironment:
 
         # If using worker grouping, create separate controller-worker communication
         if (
-            self.worker_config 
-            and self.worker_config.grouping_method in [GroupingMethod.GroupSpawn, GroupingMethod.GroupSplit]
+            self.worker_config
+            and self.worker_config.grouping_method
+            in [GroupingMethod.GroupSpawn, GroupingMethod.GroupSplit]
             and self.worker_config.nprocs_per_worker > 1
         ):
             color = 1 if is_controller else 2
             controller_comm = world_comm.Split(color, key=0 if is_controller else 1)
 
         return MPIController(
-            controller_comm, 
-            time_limit=getattr(self.config.execution, "timeout", None)
+            controller_comm, time_limit=getattr(self.config.execution, "timeout", None)
         )
 
     def _create_worker(self):
@@ -610,10 +642,10 @@ class DistributedEnvironment:
         # Clean up controller
         if self._controller:
             # Shutdown any active task controllers
-            if hasattr(self, '_active_controllers'):
-                for controller in getattr(self, '_active_controllers', []):
+            if hasattr(self, "_active_controllers"):
+                for controller in getattr(self, "_active_controllers", []):
                     controller._shutdown()
-            
+
             self._controller.exit()
             self._controller = None
 
@@ -621,7 +653,6 @@ class DistributedEnvironment:
         for thread in self._worker_threads:
             if thread.is_alive():
                 thread.join(timeout=self.exit_timeout)
-                    
 
         self._active = False
         logger.info("Distributed environment cleanup complete")
@@ -629,9 +660,9 @@ class DistributedEnvironment:
 
 # Convenience factory functions following functional programming patterns
 def create_spawn_environment(
-    nprocs_per_worker: int = 2, 
-    broker_is_worker: bool = True, 
-    config: Optional[Config] = None
+    nprocs_per_worker: int = 2,
+    broker_is_worker: bool = True,
+    config: Optional[Config] = None,
 ) -> DistributedEnvironment:
     """Create distributed environment with spawn-based worker grouping"""
     worker_config = WorkerGroupConfig(
@@ -643,9 +674,9 @@ def create_spawn_environment(
 
 
 def create_split_environment(
-    nprocs_per_worker: int = 2, 
-    broker_is_worker: bool = True, 
-    config: Optional[Config] = None
+    nprocs_per_worker: int = 2,
+    broker_is_worker: bool = True,
+    config: Optional[Config] = None,
 ) -> DistributedEnvironment:
     """Create distributed environment with split-based worker grouping"""
     worker_config = WorkerGroupConfig(
@@ -654,7 +685,6 @@ def create_split_environment(
         broker_is_worker=broker_is_worker,
     )
     return DistributedEnvironment(config, worker_config)
-
 
 
 # Auto-initialization for workers
