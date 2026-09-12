@@ -2230,7 +2230,6 @@ def run(
             if fun is not None:
                 fun(worker, *args)
             worker.serve()
-            MPI.Finalize()
         else:
             raise RuntimeError("distwq.run: invalid worker configuration")
 
