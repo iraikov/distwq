@@ -2150,6 +2150,10 @@ def run(
                 controller_worker_comm = world_comm.Split(
                     color, key=0 if is_controller else 1
                 )
+            elif size > 1:
+                controller_worker_comm = world_comm.Split(
+                    0, key=0 if is_controller else 1
+                )
             controller = MPIController(controller_worker_comm, time_limit=time_limit)
             signal.signal(signal.SIGINT, lambda signum, frame: controller.abort())
             req = controller_worker_comm.Ibarrier()
@@ -2224,9 +2228,14 @@ def run(
 
         elif is_worker:  # I'm a worker
             worker_id = rank
-            req = world_comm.Ibarrier()
+            controller_worker_comm = (
+                world_comm.Split(0, key=0 if is_controller else 1)
+                if size > 1
+                else world_comm
+            )
+            req = controller_worker_comm.Ibarrier()
             req.wait()
-            worker = MPIWorker(world_comm, group_comm)
+            worker = MPIWorker(controller_worker_comm, group_comm)
             if fun is not None:
                 fun(worker, *args)
             worker.serve()
