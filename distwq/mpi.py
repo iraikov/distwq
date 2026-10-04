@@ -2,7 +2,7 @@
 #
 # Distributed work queue operations using mpi4py.
 #
-# Copyright (C) 2020-2023 Ivan Raikov and distwq authors.
+# Copyright (C) 2020-2026 Ivan Raikov and distwq authors.
 #
 # Based on mpi.py from the pyunicorn project.
 # Copyright (C) 2008--2019 Jonathan F. Donges and pyunicorn authors
@@ -68,6 +68,65 @@ class GroupingMethod(IntEnum):
 
 
 logger = logging.getLogger(__name__)
+
+# Largest payload sent as a single physical MPI
+# message. Point-to-point Send/Recv counts are limited to a 32-bit
+# signed range by the underlying MPI implementation.
+_MAX_MSG_BYTES = 1 << 30
+
+
+def _isend_bytes(comm: Intracomm, data: bytes, dest: int, tag: int) -> None:
+    """Send *data* to *dest* tagged *tag*, blocking until fully sent.
+
+    Splits *data* into multiple physical messages when it exceeds a single
+    message's size limit, so a payload of any length can be sent reliably.
+    The receiver reconstructs it with :func:`_recv_bytes`, called with the
+    same communicator, source, and tag.
+
+    Wire format: one 8-byte little-endian length header, followed by
+    however many chunks of at most ``_MAX_MSG_BYTES`` bytes it takes to
+    carry the rest, all on *tag*. MPI preserves the order of messages sent
+    between the same ordered pair of ranks on the same tag, so the
+    receiver can read this sequence back in the order it was sent.
+    """
+    n = len(data)
+    req = comm.Isend([n.to_bytes(8, "little"), MPI.BYTE], dest=dest, tag=tag)
+    req.wait()
+    # Slicing a memoryview sends each chunk without copying it.
+    view = memoryview(data)
+    offset = 0
+    while offset < n:
+        end = min(offset + _MAX_MSG_BYTES, n)
+        req = comm.Isend([view[offset:end], MPI.BYTE], dest=dest, tag=tag)
+        req.wait()
+        offset = end
+
+
+def _recv_bytes(comm: Intracomm, source: int, tag: int) -> Union[bytes, bytearray]:
+    """Receive a payload sent with :func:`_isend_bytes` from *source*
+    tagged *tag*.
+
+    Returns the receive buffer itself rather than a copy, so a large
+    payload is held in memory only once before it is unpickled.
+
+    Only call this once a matching message is known to be pending (e.g.
+    after a successful ``Iprobe`` for this exact ``(source, tag)`` pair) --
+    receives must match the source and tag.
+    """
+    header = bytearray(8)
+    comm.Recv([header, 8, MPI.BYTE], source=source, tag=tag)
+    n = int.from_bytes(bytes(header), "little")
+    if n == 0:
+        return b""
+    buf = bytearray(n)
+    view = memoryview(buf)
+    offset = 0
+    while offset < n:
+        end = min(offset + _MAX_MSG_BYTES, n)
+        comm.Recv([view[offset:end], end - offset, MPI.BYTE], source=source, tag=tag)
+        offset = end
+    return buf
+
 
 # try to get the communicator object to see whether mpi is available:
 try:
@@ -161,7 +220,6 @@ class MPIController(object):
         self.workers_available = True if size > 1 else False
 
         self.count = 0
-        self.recvbuf = bytearray(1 << 20)  # 1 MB default buffer
 
         self.start_time = start_time
         self.time_limit = time_limit
@@ -237,31 +295,37 @@ class MPIController(object):
         - "total_time": total wall time until this call was finished
         """
 
-    def process(self, limit: int = 1000) -> List[Union[int, Any]]:
+    def process(self, limit: int = 1000, block: bool = False) -> List[Union[int, Any]]:
         """
         Process incoming messages.
+
+        :arg int limit: stop after handling this many DONE messages in one
+            call.
+        :arg bool block: if True and nothing is immediately pending, wait
+            for the next message with a blocking MPI probe before giving
+            up. Default False: return promptly if nothing is pending right now.
         """
         if not self.workers_available:
             return
         count = 0
         status = MPI.Status()
-        while self.comm.Iprobe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status):
+        have_message = self.comm.Iprobe(
+            source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status
+        )
+        if block and not have_message:
+            self.comm.Probe(source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status)
+            have_message = True
+        while have_message:
             if (limit is not None) and (limit < count):
                 break
 
             worker = status.Get_source()
             tag = status.Get_tag()
-            byte_count = status.Get_count(MPI.BYTE)
-            if len(self.recvbuf) < byte_count:
-                self.recvbuf = bytearray(byte_count)
-
-            self.comm.Recv([self.recvbuf, byte_count, MPI.BYTE], source=worker, tag=tag)
+            payload = _recv_bytes(self.comm, source=worker, tag=tag)
 
             if tag == MessageTag.READY.value:
                 if worker not in self.ready_workers:
-                    data = None
-                    if byte_count > 0:
-                        data = pickle.loads(self.recvbuf[:byte_count])
+                    data = pickle.loads(payload) if payload else None
                     self.ready_workers.append(worker)
                     self.ready_workers_data[worker] = data
                     self.active_workers.add(worker)
@@ -269,7 +333,7 @@ class MPIController(object):
                     f"MPI controller : received READY message from worker {worker}"
                 )
             elif tag == MessageTag.DONE.value:
-                (task_id, results, stats) = pickle.loads(self.recvbuf[:byte_count])
+                (task_id, results, stats) = pickle.loads(payload)
                 logger.info(
                     f"MPI controller : received DONE message for task {task_id} "
                     f"from worker {worker}"
@@ -286,8 +350,9 @@ class MPIController(object):
                 count += 1
             else:
                 raise RuntimeError(f"MPI controller : invalid message tag {tag}")
-        else:
-            time.sleep(1)
+            have_message = self.comm.Iprobe(
+                source=MPI.ANY_SOURCE, tag=MPI.ANY_TAG, status=status
+            )
 
         return self.submit_waiting()
 
@@ -756,7 +821,9 @@ class MPIController(object):
         :return: return value of call.
         """
         if task_id in self.results:
-            return task_id, self.results[task_id]
+            if task_id in self.result_queue:
+                self.result_queue.remove(task_id)
+            return task_id, self.results.pop(task_id)
         source = self.assigned[task_id]
         if self.workers_available:
             if self.worker_queue[source][0] != task_id:
@@ -770,7 +837,7 @@ class MPIController(object):
             )
 
             while task_id not in self.results:
-                self.process()
+                self.process(block=True)
 
             logger.info(
                 f"MPI controller : received result for call with id {task_id} "
@@ -781,7 +848,7 @@ class MPIController(object):
             logger.info(
                 f"MPI controller : returning result for call with id {task_id} ..."
             )
-        result = self.results[task_id]
+        result = self.results.pop(task_id)
         self.result_queue.remove(task_id)
         return task_id, result
 
@@ -799,21 +866,36 @@ class MPIController(object):
 
         Can only be called by the controller.
 
-        If the call is not yet finished, waits for it to finish.
+        If the call is not yet finished, waits for it to finish. This
+        includes a call submitted so recently that it has not yet been
+        assigned to a worker.
 
         :rtype:  object
-        :return: id, return value of call, or None of there are no more calls in
-                 the queue.
+        :return: id, return value of call, or None if there are no calls
+                 outstanding at all.
         """
-        self.process()
-        if len(self.result_queue) > 0:
-            task_id = self.result_queue.pop(0)
-            return task_id, self.results[task_id]
-        elif len(self.task_queue) > 0:
-            task_id = self.task_queue[0]
-            return task_id, self.get_result(task_id)[1]
-        else:
-            return None
+        while True:
+            # Non-blocking first: pick up anything already arrived and
+            # dispatch any waiting call to a worker that is already ready,
+            # before deciding whether there is anything left to wait for.
+            self.process()
+            if len(self.result_queue) > 0:
+                task_id = self.result_queue.pop(0)
+                return task_id, self.results.pop(task_id)
+            elif len(self.task_queue) > 0:
+                task_id = self.task_queue[0]
+                # Dispatched but not yet finished -- get_result() blocks
+                # (via a blocking probe, not polling) until it is.
+                return task_id, self.get_result(task_id)[1]
+            elif len(self.waiting) > 0:
+                # Submitted but not yet dispatched to any worker -- wait
+                # for the next message (presumably a worker reporting
+                # ready) and re-check, rather than reporting nothing
+                # available while a call is only temporarily unassigned.
+                self.process(block=True)
+                continue
+            else:
+                return None
 
     def probe_next_result(self):
         """
@@ -833,7 +915,7 @@ class MPIController(object):
             logger.info(
                 f"MPI controller : received result for call with id {task_id} ..."
             )
-            return task_id, self.results[task_id]
+            return task_id, self.results.pop(task_id)
         else:
             return None
 
@@ -857,7 +939,7 @@ class MPIController(object):
                 logger.info(
                     f"MPI controller : received result for call with id {task_id} ..."
                 )
-                ret.append((task_id, self.results[task_id]))
+                ret.append((task_id, self.results.pop(task_id)))
 
         return ret
 
@@ -1011,68 +1093,64 @@ class MPIWorker(object):
         logger.info(f"MPI worker {rank}: waiting for calls.")
 
         # wait for orders:
-        ready = True
         status = MPI.Status()
         exit_flag = False
         while not exit_flag:
             # signal the controller this worker is ready
-            if ready:
-                ready_bytes = pickle.dumps(self.ready_data)
-                req = self.comm.Isend(
-                    [ready_bytes, MPI.BYTE], dest=0, tag=MessageTag.READY.value
-                )
-                req.wait()
+            _isend_bytes(
+                self.comm,
+                pickle.dumps(self.ready_data),
+                dest=0,
+                tag=MessageTag.READY.value,
+            )
 
-            # get next task from queue:
-            if self.comm.Iprobe(source=0, tag=MPI.ANY_TAG, status=status):
-                tag = status.Get_tag()
-                data = self.comm.recv(source=0, tag=tag)
+            # Block until the controller sends a task or exit signal.
+            self.comm.Probe(source=0, tag=MPI.ANY_TAG, status=status)
+            tag = status.Get_tag()
+            data = self.comm.recv(source=0, tag=tag)
 
-                # TODO: add timeout and check whether controller lives!
-                object_to_call = None
-                if tag == MessageTag.EXIT.value:
-                    logger.info(f"MPI worker {self.worker_id}: exiting...")
-                    exit_flag = True
-                    break
-                elif tag == MessageTag.TASK.value:
-                    try:
-                        (name_to_call, args, kwargs, module, time_est, task_id) = data
-                        if module not in sys.modules:
-                            importlib.import_module(module)
-                        object_to_call = eval(
-                            name_to_call, sys.modules[module].__dict__
-                        )
-                    except NameError:
-                        logger.error(str(sys.modules[module].__dict__.keys()))
-                        raise
-                else:
-                    raise RuntimeError(
-                        f"MPI worker {self.worker_id}: unknown message tag {tag}"
-                    )
-                self.total_time_est[rank] += time_est
-                call_time = time.time()
-                result = object_to_call(*args, **kwargs)
-                this_time = time.time() - call_time
-                self.n_processed[rank] += 1
-                self.stats.append(
-                    {
-                        "id": task_id,
-                        "rank": rank,
-                        "this_time": this_time,
-                        "time_over_est": this_time / time_est,
-                        "n_processed": self.n_processed[rank],
-                        "total_time": time.time() - start_time,
-                    }
-                )
-                data_bytes = pickle.dumps((task_id, result, self.stats[-1]))
-                req = self.comm.Isend(
-                    [data_bytes, MPI.BYTE], dest=0, tag=MessageTag.DONE.value
-                )
-                req.wait()
-                ready = True
+            object_to_call = None
+            if tag == MessageTag.EXIT.value:
+                logger.info(f"MPI worker {self.worker_id}: exiting...")
+                exit_flag = True
+                break
+            elif tag == MessageTag.TASK.value:
+                try:
+                    (name_to_call, args, kwargs, module, time_est, task_id) = data
+                    if module not in sys.modules:
+                        importlib.import_module(module)
+                    object_to_call = eval(name_to_call, sys.modules[module].__dict__)
+                except NameError:
+                    logger.error(str(sys.modules[module].__dict__.keys()))
+                    raise
             else:
-                ready = False
-                time.sleep(1)
+                raise RuntimeError(
+                    f"MPI worker {self.worker_id}: unknown message tag {tag}"
+                )
+            self.total_time_est[rank] += time_est
+            call_time = time.time()
+            result = object_to_call(*args, **kwargs)
+            this_time = time.time() - call_time
+            self.n_processed[rank] += 1
+            self.stats.append(
+                {
+                    "id": task_id,
+                    "rank": rank,
+                    "this_time": this_time,
+                    "time_over_est": this_time / time_est,
+                    "n_processed": self.n_processed[rank],
+                    "total_time": time.time() - start_time,
+                }
+            )
+            _isend_bytes(
+                self.comm,
+                pickle.dumps((task_id, result, self.stats[-1])),
+                dest=0,
+                tag=MessageTag.DONE.value,
+            )
+            # Drop the sent result now rather than holding it, which may be
+            # large, until the next call returns.
+            result = None
 
     def abort(self):
         traceback.print_exc()
@@ -1242,6 +1320,7 @@ class MPICollectiveWorker(object):
                 }
             )
             self.gather_results(result)
+            result = None
 
     def gather_results(self, result: Any) -> None:
         if self.collective_mode == CollectiveMode.Gather:
@@ -1350,21 +1429,18 @@ class MPICollectiveBroker(object):
         # wait for orders:
         while True:
             # signal the controller this worker is ready
-            ready_bytes = pickle.dumps(self.ready_data)
-            req = self.comm.Isend(
-                [ready_bytes, MPI.BYTE], dest=0, tag=MessageTag.READY.value
+            _isend_bytes(
+                self.comm,
+                pickle.dumps(self.ready_data),
+                dest=0,
+                tag=MessageTag.READY.value,
             )
-            req.wait()
             logger.info(
                 f"MPI collective broker {self.worker_id}: "
                 "getting next task from controller..."
             )
 
-            while True:
-                msg = self.process()
-                if msg is not None:
-                    tag, data = msg
-                    break
+            tag, data = self.process()
 
             logger.info(
                 f"MPI collective broker {self.worker_id}: "
@@ -1442,11 +1518,12 @@ class MPICollectiveBroker(object):
                 f"MPI collective broker {self.worker_id}: "
                 "sending results to controller..."
             )
-            data_bytes = pickle.dumps((task_id, results, stat))
-            req = self.comm.Isend(
-                [data_bytes, MPI.BYTE], dest=0, tag=MessageTag.DONE.value
+            _isend_bytes(
+                self.comm,
+                pickle.dumps((task_id, results, stat)),
+                dest=0,
+                tag=MessageTag.DONE.value,
             )
-            req.wait()
 
     def scatter_task(
         self,
@@ -1529,21 +1606,13 @@ class MPICollectiveBroker(object):
 
     def process(
         self,
-    ) -> Optional[
-        Union[
-            Tuple[int, None],
-            Tuple[int, Tuple[str, Tuple[int], Dict[Any, Any], str, int, int]],
-        ]
-    ]:
+    ) -> Tuple[int, Union[None, Tuple[str, Tuple[int], Dict[Any, Any], str, int, int]]]:
+        # Blocks until the controller sends something.
         status = MPI.Status()
-        if self.comm.Iprobe(source=0, tag=MPI.ANY_TAG, status=status):
-            # get next task from controller queue:
-            tag = status.Get_tag()
-            data = self.comm.recv(source=0, tag=tag)
-            return tag, data
-        else:
-            time.sleep(1)
-            return None
+        self.comm.Probe(source=0, tag=MPI.ANY_TAG, status=status)
+        tag = status.Get_tag()
+        data = self.comm.recv(source=0, tag=tag)
+        return tag, data
 
     def abort(self):
         rank = self.comm.rank
@@ -2092,8 +2161,14 @@ def run(
                 controller_worker_comm = world_comm.Split(
                     color, key=0 if is_controller else 1
                 )
+            elif size > 1:
+                controller_worker_comm = world_comm.Split(
+                    0, key=0 if is_controller else 1
+                )
             controller = MPIController(controller_worker_comm, time_limit=time_limit)
-            signal.signal(signal.SIGINT, lambda signum, frame: controller.abort())
+            previous_sigint = signal.signal(
+                signal.SIGINT, lambda signum, frame: controller.abort()
+            )
             req = controller_worker_comm.Ibarrier()
             req.wait()
             try:  # put everything in a try block to be able to exit!
@@ -2101,6 +2176,13 @@ def run(
             except ValueError:
                 controller.abort()
             controller.exit()
+            # The handler refers to this controller; restoring the previous
+            # handler lets the controller and any results it still holds be
+            # freed once run() returns.
+            signal.signal(
+                signal.SIGINT,
+                previous_sigint if previous_sigint is not None else signal.SIG_DFL,
+            )
         elif is_worker and spawn_workers:  # I'm a broker
             worker_id = group_comm.rank + 1
             is_broker = True
@@ -2166,13 +2248,17 @@ def run(
 
         elif is_worker:  # I'm a worker
             worker_id = rank
-            req = world_comm.Ibarrier()
+            controller_worker_comm = (
+                world_comm.Split(0, key=0 if is_controller else 1)
+                if size > 1
+                else world_comm
+            )
+            req = controller_worker_comm.Ibarrier()
             req.wait()
-            worker = MPIWorker(world_comm, group_comm)
+            worker = MPIWorker(controller_worker_comm, group_comm)
             if fun is not None:
                 fun(worker, *args)
             worker.serve()
-            MPI.Finalize()
         else:
             raise RuntimeError("distwq.run: invalid worker configuration")
 

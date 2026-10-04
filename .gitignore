@@ -130,3 +130,6 @@ dmypy.json
 
 # poetry build files
 dist
+
+# Emacs backup
+*~
