@@ -1,7 +1,6 @@
 # Future-based distributed task management with Two-Phase Iterator design
 
 import logging
-import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from typing import (
@@ -15,17 +14,14 @@ from typing import (
 try:
     from .mpi import (
         GroupingMethod,
+        MessageTag,
         MPIController,
-        MPIWorker,
-        check_spawn_config,
-        check_split_config,
-        get_group_comm,
+        Topology,
+        establish_topology,
         has_mpi,
         is_controller,
         is_worker,
         rank,
-        run_spawn_group,
-        run_split_group,
         worker_main,
         world_comm,
     )
@@ -33,15 +29,14 @@ except ImportError:
     # Try absolute import
     from mpi import (
         GroupingMethod,
+        MessageTag,
         MPIController,
-        MPIWorker,
-        get_group_comm,
+        Topology,
+        establish_topology,
         has_mpi,
         is_controller,
         is_worker,
         rank,
-        run_spawn_group,
-        run_split_group,
         worker_main,
         world_comm,
     )
@@ -216,6 +211,7 @@ class TaskController:
         self._completion_counter = 0
         # Seconds to sleep between non-blocking checks when a wait has a timeout.
         self.poll_interval = 0.01
+        self._closed = False
 
     def submit(
         self, func: Callable[..., R], *args, timeout: int | None = None, **kwargs
@@ -370,11 +366,15 @@ class TaskController:
                 time.sleep(self.poll_interval)
 
     def _close(self) -> None:
-        """Wait for every pending future to receive its result.
+        """End the session.
 
-        Called when the session ends, before the controller tells workers
-        to exit.  Calling it again does nothing once nothing is pending.
+        Waits for every pending future to receive its result, then tells
+        the workers to return from serve().  Only the first call has any
+        effect.
         """
+        if self._closed:
+            return
+        self._closed = True
         while self._pending:
             for task_id in [t for t in self._pending if not self._is_outstanding(t)]:
                 self._pending.pop(task_id)._fail(
@@ -383,6 +383,8 @@ class TaskController:
                 )
             if self._pending:
                 self._pump(block=True)
+        if self._controller:
+            self._controller.end_session()
 
     def _get_worker_info(self, task_id: int) -> dict[str, Any] | None:
         """Get information about the worker or worker group processing this task"""
@@ -521,8 +523,24 @@ def wait(
     return done, pending - done
 
 
+# The environment that is currently entered on this rank, if any.
+_active_environment: "DistributedEnvironment | None" = None
+
+
 class DistributedEnvironment:
-    """Distributed computing environment that coordinates MPI setup and task execution"""
+    """Distributed computing environment that coordinates MPI setup and task execution.
+
+    All ranks enter the environment together.  Every rank runs on a single
+    thread: the controller drives the work from controller_session(), and
+    each worker rank serves calls on its main thread for the length of
+    each session.  The controller ends a session by sending SESSION_END and
+    ends the environment by sending EXIT, so every rank leaves each session
+    and the environment at a well-defined point.
+
+    Only one environment can be entered at a time.  Entering a second one
+    inside the first raises RuntimeError on every rank, before any MPI
+    call is made.
+    """
 
     def __init__(
         self,
@@ -532,18 +550,15 @@ class DistributedEnvironment:
         self.config = config or Config()
         self.worker_config = worker_config
 
+        self._topology: Topology | None = None
         self._controller = None
         self._session: TaskController | None = None
-        self._worker = None
+        # Worker-side server: an MPIWorker, MPICollectiveBroker or
+        # MPICollectiveWorker, depending on this rank's role.
+        self._server = None
+        # Set once the controller has told this worker rank to exit.
+        self._exit_received = False
         self._active = False
-        self._group_comm = None
-        self._worker_threads = []
-
-        # For worker grouping
-        self._is_broker = False
-        self._worker_id = None
-
-        self.exit_timeout = 2.0
 
     def __enter__(self) -> "DistributedEnvironment":  # noqa: PYI034
         """Set up distributed environment - ALL ranks participate"""
@@ -555,23 +570,51 @@ class DistributedEnvironment:
         self._cleanup_environment()
         return False
 
+    @property
+    def role(self) -> str | None:
+        """This rank's role, as set by establish_topology(), or None
+        before the environment is entered."""
+        return self._topology.role if self._topology is not None else None
+
     def controller_session(self) -> Iterator[TaskController]:
-        """Return iterator that yields TaskController only on controller rank"""
-        if is_controller:
-            # Only controller gets the controller task
+        """Run one session of distributed work; all ranks must call this.
+
+        On the controller rank, yields a single TaskController.  When the
+        loop body finishes, by any means, the session waits for every
+        pending result and then releases the workers.
+
+        On worker ranks, yields nothing: the rank serves calls until the
+        controller ends the session, then returns, so the loop body is
+        skipped.
+        """
+        if not self._active:
+            raise RuntimeError(
+                "controller_session() must be called inside the environment"
+            )
+        if self.role == "controller":
             session = TaskController(self)
             self._session = session
             try:
                 yield session
             finally:
-                # Deliver results to futures the caller still holds.
                 session._close()
+                self._session = None
         else:
-            return iter([])
+            self._serve()
 
-    #        elif is_worker and self._worker is not None:
-    #            self._worker.serve()  # Workers block here
-    #            return iter([])
+    def _serve(self) -> MessageTag | None:
+        """Serve calls on this worker rank until the controller says stop.
+
+        Returns the tag that ended serving, or None if there is nothing to
+        serve: on idle ranks, or because the controller has already sent
+        EXIT.
+        """
+        if self._server is None or self._exit_received:
+            return None
+        tag = self._server.serve()
+        if tag == MessageTag.EXIT:
+            self._exit_received = True
+        return tag
 
     def is_active(self) -> bool:
         """Check if the distributed environment is active"""
@@ -580,6 +623,9 @@ class DistributedEnvironment:
     @property
     def worker_count(self) -> int:
         """Get the number of workers in the environment"""
+        if self._controller is not None and self._controller.workers_available:
+            # Under worker grouping the controller's workers are the brokers.
+            return self._controller.comm.size - 1
         if has_mpi and world_comm:
             return world_comm.size - 1  # Total ranks minus controller
         return 0
@@ -592,251 +638,76 @@ class DistributedEnvironment:
 
     def _setup_environment(self):
         """Set up the distributed computing environment"""
+        global _active_environment
         if self._active:
             return
+        if _active_environment is not None:
+            raise RuntimeError(
+                "a DistributedEnvironment is already active; environments "
+                "cannot be nested"
+            )
 
         logger.info(
-            f"Setting up distributed environment: is_controller={is_controller}, is_worker={is_worker}"
+            "Setting up distributed environment: "
+            f"is_controller={is_controller}, is_worker={is_worker}"
         )
 
-        # All ranks participate in MPI collective setup
-        if has_mpi:
-            self.group_id, self._group_comm = get_group_comm(
-                world_comm, world_comm.size, rank, is_controller, spawned=False
+        wc = self.worker_config or WorkerGroupConfig()
+        self._topology = establish_topology(
+            worker_grouping_method=wc.grouping_method,
+            nprocs_per_worker=wc.nprocs_per_worker,
+            broker_is_worker=wc.broker_is_worker,
+            collective_mode=wc.collective_mode,
+            enable_worker_service=wc.enable_worker_service,
+            worker_service_name=wc.worker_service_name,
+            sequential_spawn=wc.sequential_spawn,
+            spawn_startup_wait=wc.spawn_startup_wait,
+            spawn_executable=wc.spawn_executable,
+            spawn_args=wc.spawn_args,
+            verbose=getattr(self.config.logging, "verbose", False),
+        )
+        logger.info(f"Topology established: role={self._topology.role}")
+
+        if self._topology.role == "controller":
+            self._controller = MPIController(
+                self._topology.controller_worker_comm,
+                time_limit=getattr(self.config.execution, "timeout", None),
             )
-            logger.info(f"Group setup complete: group_id={self.group_id}")
-
-        # Set up controller
-        if is_controller:
-            self._controller = self._create_controller()
-            logger.info("Controller created")
-
-        # Set up workers
-        elif is_worker:
-            self._setup_workers()
-            logger.info("Worker setup complete")
+        else:
+            self._server = self._topology.server
 
         self._active = True
-
-    def _setup_workers(self):
-        """Set up workers based on configuration"""
-        if not has_mpi:
-            return
-
-        if (
-            self.worker_config
-            and self.worker_config.grouping_method == GroupingMethod.GroupSpawn
-        ):
-            self._setup_spawn_groups()
-        elif (
-            self.worker_config
-            and self.worker_config.grouping_method == GroupingMethod.GroupSplit
-        ):
-            self._setup_split_groups()
-        else:
-            # Regular worker setup
-            self._setup_regular_worker()
-
-    def _setup_regular_worker(self):
-        """Set up a regular worker (no grouping)"""
-        logger.info("Creating regular worker...")
-        self._worker = self._create_worker()
-        if self._worker:
-            # Start worker main loop in background
-            worker_thread = threading.Thread(target=self._run_worker, daemon=True)
-            worker_thread.start()
-            self._worker_threads.append(worker_thread)
-
-    def _setup_spawn_groups(self):
-        """Set up worker groups using spawn method"""
-        if not self._group_comm:
-            return
-
-        self._worker_id = self._group_comm.rank + 1
-        self._is_broker = True
-
-        # Create controller-worker communication
-        color = 1 if self._is_broker or is_controller else 2
-        controller_worker_comm = world_comm.Split(color, key=0 if is_controller else 1)
-
-        # Set up spawn group in background thread
-        spawn_thread = threading.Thread(
-            target=self._run_spawn_group, args=(controller_worker_comm,), daemon=True
-        )
-        spawn_thread.start()
-        self._worker_threads.append(spawn_thread)
-
-    def _setup_split_groups(self):
-        """Set up worker groups using split method"""
-        if not self._group_comm:
-            return
-
-        # Determine worker configuration
-        if self.worker_config.broker_is_worker:
-            n_workers = self._group_comm.size // self.worker_config.nprocs_per_worker
-            self._worker_id = (
-                self._group_comm.rank // self.worker_config.nprocs_per_worker
-            ) + 1
-            broker_set = {
-                (x * self.worker_config.nprocs_per_worker) for x in range(n_workers)
-            }
-        else:
-            n_workers = self._group_comm.size // (
-                self.worker_config.nprocs_per_worker + 1
-            )
-            self._worker_id = (
-                self._group_comm.rank // (self.worker_config.nprocs_per_worker + 1)
-            ) + 1
-            broker_set = {
-                (x * (self.worker_config.nprocs_per_worker + 1))
-                for x in range(n_workers)
-            }
-
-        self._is_broker = self._group_comm.rank in broker_set
-
-        # Create controller-worker communication
-        color = 1 if self._is_broker or is_controller else 2
-        controller_worker_comm = world_comm.Split(color, key=0 if is_controller else 1)
-
-        # Set up split group in background thread
-        split_thread = threading.Thread(
-            target=self._run_split_group,
-            args=(controller_worker_comm, broker_set, n_workers),
-            daemon=True,
-        )
-        split_thread.start()
-        self._worker_threads.append(split_thread)
-
-    def _run_spawn_group(self, controller_worker_comm):
-        """Run spawn group setup and management"""
-        run_spawn_group(
-            worker_id=self._worker_id,
-            spawn_workers=True,
-            nprocs_per_worker=self.worker_config.nprocs_per_worker,
-            broker_is_worker=self.worker_config.broker_is_worker,
-            broker_fun=None,
-            fun=None,
-            fun_name=None,
-            module_name="__main__",
-            args=(),
-            world_comm=controller_worker_comm,
-            group_comm=self._group_comm,
-            n_workers=self._group_comm.size,
-            collective_mode=self.worker_config.collective_mode,
-            enable_worker_service=self.worker_config.enable_worker_service,
-            worker_service_name=self.worker_config.worker_service_name,
-            spawn_args=self.worker_config.spawn_args,
-            sequential_spawn=self.worker_config.sequential_spawn,
-            spawn_startup_wait=self.worker_config.spawn_startup_wait,
-            spawn_executable=self.worker_config.spawn_executable,
-            verbose=getattr(self.config.logging, "verbose", False),
-        )
-
-    def _run_split_group(self, controller_worker_comm, broker_set, n_workers):
-        """Run split group setup and management"""
-        run_split_group(
-            worker_id=self._worker_id,
-            n_workers=n_workers,
-            split_workers=True,
-            is_broker=self._is_broker,
-            broker_ranks=tuple(broker_set),
-            nprocs_per_worker=self.worker_config.nprocs_per_worker,
-            broker_is_worker=self.worker_config.broker_is_worker,
-            broker_fun=None,
-            fun=None,
-            fun_name=None,
-            module_name="__main__",
-            args=(),
-            world_comm=world_comm,
-            controller_worker_comm=controller_worker_comm,
-            group_comm=self._group_comm,
-            collective_mode=self.worker_config.collective_mode,
-            verbose=getattr(self.config.logging, "verbose", False),
-        )
-
-    def _create_controller(self):
-        """Create controller instance"""
-        if not is_controller:
-            raise RuntimeError(
-                "_create_controller() can only be called by controller rank"
-            )
-
-        if not has_mpi:
-            # Single process mode
-            return MPIController(
-                world_comm, time_limit=getattr(self.config.execution, "timeout", None)
-            )
-
-        # MPI mode with potential worker grouping
-        controller_comm = world_comm
-
-        # If using worker grouping, create separate controller-worker communication
-        if (
-            self.worker_config
-            and self.worker_config.grouping_method
-            in [GroupingMethod.GroupSpawn, GroupingMethod.GroupSplit]
-            and self.worker_config.nprocs_per_worker > 1
-        ):
-            color = 1 if is_controller else 2
-            controller_comm = world_comm.Split(color, key=0 if is_controller else 1)
-
-        return MPIController(
-            controller_comm, time_limit=getattr(self.config.execution, "timeout", None)
-        )
-
-    def _create_worker(self):
-        """Create worker instance - only invoked by worker ranks"""
-        if not is_worker:
-            raise RuntimeError("_create_worker() can only be called by worker ranks")
-
-        if not has_mpi:
-            return None  # No workers in single process mode
-
-        return MPIWorker(world_comm, self._group_comm or world_comm, ready_data=None)
-
-    def _run_worker(self):
-        """Run worker main loop - called by workers at initialization time"""
-        if self._worker:
-            self._worker.serve()
-
-    def _await_all_workers_ready(self):
-        """Block until every worker has reported READY at least once.
-
-        MPIController.exit() sends EXIT only to workers it has heard from.
-        A session that submitted no work may end before any READY message
-        has been read, which would leave workers waiting forever, so read
-        them here first.
-        """
-        c = self._controller
-        if not c.workers_available:
-            return
-        n_workers = c.comm.size - 1
-        while len(c.active_workers) < n_workers:
-            c.process(block=True)
+        _active_environment = self
 
     def _cleanup_environment(self):
         """Clean up the distributed environment"""
+        global _active_environment
         if not self._active:
             return
 
-        # Clean up controller
-        if self._controller:
-            # Deliver results to any futures still pending before the
-            # controller drains and discards its queue in exit().
-            if self._session is not None:
-                self._session._close()
-                self._session = None
-
-            self._await_all_workers_ready()
-            self._controller.exit()
-            self._controller = None
-
-        # Wait for worker threads to complete
-        for thread in self._worker_threads:
-            if thread.is_alive():
-                thread.join(timeout=self.exit_timeout)
-
-        self._active = False
+        try:
+            if self._controller:
+                # A session left open, for example by an exception raised
+                # while its generator was suspended, is closed first.
+                if self._session is not None:
+                    self._session._close()
+                    self._session = None
+                self._controller.shutdown()
+                self._controller = None
+            else:
+                # Serve once more so that the controller hears from this rank
+                # and can tell it to exit.
+                tag = self._serve()
+                if tag == MessageTag.SESSION_END:
+                    raise RuntimeError(
+                        "worker received SESSION_END while leaving the "
+                        "environment: the controller ran more sessions than "
+                        "this rank"
+                    )
+        finally:
+            self._active = False
+            if _active_environment is self:
+                _active_environment = None
         logger.info("Distributed environment cleanup complete")
 
 

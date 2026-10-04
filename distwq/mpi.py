@@ -41,8 +41,10 @@ import signal
 import sys
 import time
 import traceback
+from collections.abc import Callable
+from dataclasses import dataclass
 from enum import IntEnum
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import numpy as np
 from mpi4py.MPI import Intercomm, Intracomm
@@ -59,6 +61,7 @@ class MessageTag(IntEnum):
     DONE = 1
     TASK = 2
     EXIT = 3
+    SESSION_END = 4
 
 
 class GroupingMethod(IntEnum):
@@ -102,7 +105,7 @@ def _isend_bytes(comm: Intracomm, data: bytes, dest: int, tag: int) -> None:
         offset = end
 
 
-def _recv_bytes(comm: Intracomm, source: int, tag: int) -> Union[bytes, bytearray]:
+def _recv_bytes(comm: Intracomm, source: int, tag: int) -> bytes | bytearray:
     """Receive a payload sent with :func:`_isend_bytes` from *source*
     tagged *tag*.
 
@@ -154,8 +157,8 @@ def mpi_excepthook(type, value, traceback):
 
 has_args = "-" in sys.argv
 my_args_start_index = sys.argv.index("-") + 1 if has_args else 0
-my_args: Optional[List[str]] = sys.argv[my_args_start_index:] if has_args else None
-my_config: Optional[Dict[Any, Any]] = None
+my_args: list[str] | None = sys.argv[my_args_start_index:] if has_args else None
+my_config: dict[Any, Any] | None = None
 
 # initialize:
 workers_available = True
@@ -201,9 +204,9 @@ def multiple_task_arguments(N, args, kwargs, task_ids, workers):
     Helper function to set default arguments, task ids, and workers for multiple tasks.
     """
     if (args is None) or (len(args) == 0):
-        args = [dict() for _ in range(N)]
+        args = [{} for _ in range(N)]
     if (kwargs is None) or (len(kwargs) == 0):
-        kwargs = [dict() for _ in range(N)]
+        kwargs = [{} for _ in range(N)]
     if task_ids is None:
         task_ids = [None for _ in range(N)]
     if workers is None:
@@ -212,12 +215,12 @@ def multiple_task_arguments(N, args, kwargs, task_ids, workers):
     return args, kwargs, task_ids, workers
 
 
-class MPIController(object):
+class MPIController:
     def __init__(self, comm: Intracomm, time_limit: Any = None) -> None:
         size = comm.size
 
         self.comm = comm
-        self.workers_available = True if size > 1 else False
+        self.workers_available = size > 1
 
         self.count = 0
 
@@ -231,34 +234,34 @@ class MPIController(object):
         On worker i, only total_time_est[i] is available.
         """
         self.total_time_est[0] = np.inf
-        self.result_queue: List[int] = []
-        self.task_queue: List[int] = []
-        self.wait_queue: List[int] = []
-        self.waiting: Dict[
+        self.result_queue: list[int] = []
+        self.task_queue: list[int] = []
+        self.wait_queue: list[int] = []
+        self.waiting: dict[
             int,
-            Tuple[
+            tuple[
                 str,
-                Union[List[Any], Tuple[Any]],
-                Dict[Any, Any],
+                list[Any] | tuple[Any],
+                dict[Any, Any],
                 str,
-                Optional[int],
-                Optional[int],
+                int | None,
+                int | None,
             ],
         ] = {}
-        self.ready_workers: List[int] = []
-        self.ready_workers_data: Dict[int, Any] = {}
+        self.ready_workers: list[int] = []
+        self.ready_workers_data: dict[int, Any] = {}
         """(list) ids of submitted calls"""
         self.assigned = {}
         """
         (dictionary)
         assigned[id] is the worker assigned to the call with that id.
         """
-        self.worker_queue = [[] for i in range(0, size)]
+        self.worker_queue = [[] for i in range(size)]
         """
         (list of lists)
         worker_queue[i] contains the ids of calls assigned to worker i.
         """
-        self.active_workers = set([])
+        self.active_workers = set()
         """
         (set) active_workers contains the ids of workers that have
         communicated with the controller
@@ -295,7 +298,7 @@ class MPIController(object):
         - "total_time": total wall time until this call was finished
         """
 
-    def process(self, limit: int = 1000, block: bool = False) -> List[Union[int, Any]]:
+    def process(self, limit: int = 1000, block: bool = False) -> list[int | Any]:
         """
         Process incoming messages.
 
@@ -359,12 +362,12 @@ class MPIController(object):
     def submit_call(
         self,
         name_to_call: str,
-        args: Tuple[Any] = (),
-        kwargs: Dict[Any, Any] = {},
+        args: tuple[Any] = (),
+        kwargs: dict[Any, Any] | None = None,
         module_name: str = "__main__",
         time_est: int = 1,
-        task_id: Optional[int] = None,
-        worker: Optional[int] = None,
+        task_id: int | None = None,
+        worker: int | None = None,
     ) -> int:
         """
         Submit a call for parallel execution.
@@ -440,6 +443,8 @@ class MPIController(object):
             estimate. Default: None
         :return object: id of call, to be used in get_result().
         """
+        if kwargs is None:
+            kwargs = {}
         if task_id is None:
             task_id = self.count
             self.count += 1
@@ -518,12 +523,12 @@ class MPIController(object):
     def queue_call(
         self,
         name_to_call: str,
-        args: Union[List[Any], Tuple[Any]] = (),
-        kwargs: Dict[Any, Any] = {},
+        args: list[Any] | tuple[Any] = (),
+        kwargs: dict[Any, Any] | None = None,
         module_name: str = "__main__",
         time_est: int = 1,
-        task_id: Optional[int] = None,
-        requested_worker: Optional[int] = None,
+        task_id: int | None = None,
+        requested_worker: int | None = None,
     ) -> int:
         """Submit a call for later execution.
 
@@ -562,6 +567,8 @@ class MPIController(object):
             Default: None
 
         """
+        if kwargs is None:
+            kwargs = {}
         if task_id is None:
             task_id = self.count
             self.count += 1
@@ -607,14 +614,14 @@ class MPIController(object):
 
         return task_id
 
-    def submit_waiting(self) -> List[Union[int, Any]]:
+    def submit_waiting(self) -> list[int | Any]:
         """
         Submit waiting tasks if workers are available.
 
         :return object: ids of calls, to be used in get_result().
         """
         task_ids = []
-        if self.workers_available:
+        if self.workers_available:  # noqa: SIM102
             if (len(self.waiting) > 0) and len(self.ready_workers) > 0:
                 reqs = []
                 status = []
@@ -669,13 +676,13 @@ class MPIController(object):
     def submit_multiple(
         self,
         name_to_call: str,
-        args: List[List[Any]] = [],
-        kwargs: List[Dict[Any, Any]] = [],
+        args: list[list[Any]] | None = None,
+        kwargs: list[dict[Any, Any]] | None = None,
         module_name: str = "__main__",
         time_est: int = 1,
-        task_ids: Optional[int] = None,
-        workers: Optional[int] = None,
-    ) -> List[int]:
+        task_ids: int | None = None,
+        workers: int | None = None,
+    ) -> list[int]:
         """Submit multiple calls for parallel execution.
 
         Analogous to submit_call, but accepts lists of arguments and
@@ -799,9 +806,9 @@ class MPIController(object):
 
     def get_result(
         self, task_id: int
-    ) -> Union[
-        Tuple[int, Tuple[ndarray, ndarray]], Tuple[int, List[Tuple[ndarray, ndarray]]]
-    ]:
+    ) -> (
+        tuple[int, tuple[ndarray, ndarray]] | tuple[int, list[tuple[ndarray, ndarray]]]
+    ):
         """
         Return result of earlier submitted call.
 
@@ -854,12 +861,11 @@ class MPIController(object):
 
     def get_next_result(
         self,
-    ) -> Optional[
-        Union[
-            Tuple[int, Tuple[ndarray, ndarray]],
-            Tuple[int, List[Tuple[ndarray, ndarray]]],
-        ]
-    ]:
+    ) -> (
+        tuple[int, tuple[ndarray, ndarray]]
+        | tuple[int, list[tuple[ndarray, ndarray]]]
+        | None
+    ):
         """
         Return result of next earlier submitted call whose result has not yet
         been obtained.
@@ -1030,6 +1036,70 @@ class MPIController(object):
                 )
             MPI.Request.Waitall(reqs)
 
+    def wait_all_ready(self) -> None:
+        """
+        Block until every worker is idle and has reported READY.
+
+        A worker reports READY each time it enters serve() and after each
+        call it finishes, so once all of them are in the ready list no
+        worker is busy and none is still starting up.  All submitted calls
+        must already have been collected, since a worker holding a call
+        would never become ready.
+
+        Can only be called by the controller.
+        """
+        if not self.workers_available:
+            return
+        if self.task_queue or self.waiting:
+            raise RuntimeError(
+                "MPI controller : cannot wait for idle workers while calls "
+                f"are outstanding (running: {self.task_queue}, "
+                f"waiting: {list(self.waiting)})"
+            )
+        n_workers = self.comm.size - 1
+        while len(self.ready_workers) < n_workers:
+            self.process(block=True)
+
+    def _send_to_all_workers(self, tag: MessageTag) -> None:
+        """Send an empty message with tag to every worker, then forget
+        that they were ready: each will report READY again when it next
+        enters serve()."""
+        reqs = [
+            self.comm.isend(None, dest=worker, tag=tag.value)
+            for worker in range(1, self.comm.size)
+        ]
+        MPI.Request.Waitall(reqs)
+        self.ready_workers = []
+        self.ready_workers_data = {}
+
+    def end_session(self) -> None:
+        """
+        End the current session: wait until every worker is idle, then
+        tell each one to return from serve() without exiting.
+
+        The workers can serve another session afterwards.  Can only be
+        called by the controller.
+        """
+        if not self.workers_available:
+            return
+        self.wait_all_ready()
+        logger.info("MPI controller : ending session on all workers...")
+        self._send_to_all_workers(MessageTag.SESSION_END)
+
+    def shutdown(self) -> None:
+        """
+        Wait until every worker is idle, then tell all of them to exit.
+
+        Unlike exit(), which tells only the workers it has already heard
+        from, this waits to hear from every worker first, so none is left
+        waiting for orders.  Can only be called by the controller.
+        """
+        if not self.workers_available:
+            return
+        self.wait_all_ready()
+        logger.info("MPI controller : telling all workers to exit...")
+        self._send_to_all_workers(MessageTag.EXIT)
+
     def abort(self):
         """
         Abort execution on all MPI nodes immediately.
@@ -1051,9 +1121,9 @@ class MPIController(object):
         return True
 
 
-class MPIWorker(object):
+class MPIWorker:
     def __init__(
-        self, comm: Intracomm, group_comm: Intracomm, ready_data: Optional[Any] = None
+        self, comm: Intracomm, group_comm: Intracomm, ready_data: Any | None = None
     ) -> None:
         size = comm.size
         rank = comm.rank
@@ -1073,9 +1143,14 @@ class MPIWorker(object):
 
         logger.info(f"MPI worker {self.worker_id}: initialized.")
 
-    def serve(self) -> None:
+    def serve(self) -> MessageTag:
         """
         Serve submitted calls until told to finish.
+
+        Returns the tag of the message that ended serving:
+        MessageTag.SESSION_END when the controller ends a session and
+        will later ask this worker to serve again, or MessageTag.EXIT
+        when the controller is finished with it.
 
         Call this function if workers need to perform initialization
         different from the controller, like this:
@@ -1094,8 +1169,7 @@ class MPIWorker(object):
 
         # wait for orders:
         status = MPI.Status()
-        exit_flag = False
-        while not exit_flag:
+        while True:
             # signal the controller this worker is ready
             _isend_bytes(
                 self.comm,
@@ -1112,8 +1186,10 @@ class MPIWorker(object):
             object_to_call = None
             if tag == MessageTag.EXIT.value:
                 logger.info(f"MPI worker {self.worker_id}: exiting...")
-                exit_flag = True
-                break
+                return MessageTag.EXIT
+            elif tag == MessageTag.SESSION_END.value:
+                logger.info(f"MPI worker {self.worker_id}: session ended.")
+                return MessageTag.SESSION_END
             elif tag == MessageTag.TASK.value:
                 try:
                     (name_to_call, args, kwargs, module, time_est, task_id) = data
@@ -1158,7 +1234,7 @@ class MPIWorker(object):
         self.comm.Abort()
 
 
-class MPICollectiveWorker(object):
+class MPICollectiveWorker:
     def __init__(
         self,
         comm: Intracomm,
@@ -1225,7 +1301,7 @@ class MPICollectiveWorker(object):
                         if e.Get_error_class() == MPI.ERR_NAME:
                             time.sleep(random.randrange(1, 5))
                         else:
-                            raise e
+                            raise
                     attempt += 1
                 assert self.worker_port is not None
                 self.comm.bcast(self.worker_port, root=0)
@@ -1243,12 +1319,16 @@ class MPICollectiveWorker(object):
                 client_worker_comm = self.comm.Accept(self.worker_port, info, root=0)
                 self.client_worker_comms.append(client_worker_comm)
 
-    def serve(self) -> None:
+    def serve(self) -> MessageTag:
         """
         Serve submitted calls until told to finish. Tasks are
         obtained via scatter and results are returned via gather,
         i.e. all collective workers spawned by a CollectiveBroker
         will participate in these collective calls.
+
+        Returns MessageTag.SESSION_END when the broker relays the end of
+        a session, keeping all communicators open so that serve() can be
+        called again, or MessageTag.EXIT after closing them on exit.
 
         Call this function if workers need to perform initialization
         different from the controller, like this:
@@ -1283,6 +1363,11 @@ class MPICollectiveWorker(object):
                 "received next task from queue."
             )
             # TODO: add timeout and check whether controller lives!
+            if name_to_call == "session_end":
+                logger.info(
+                    f"MPI collective worker {self.worker_id}-{rank}: session ended."
+                )
+                return MessageTag.SESSION_END
             if name_to_call == "exit":
                 logger.info(
                     f"MPI collective worker {self.worker_id}-{rank}: exiting..."
@@ -1295,7 +1380,7 @@ class MPICollectiveWorker(object):
                     MPI.Unpublish_name(self.worker_service_name, self.worker_port)
                     MPI.Close_port(self.worker_port)
                 self.merged_comm.Disconnect()
-                break
+                return MessageTag.EXIT
             try:
                 if module not in sys.modules:
                     importlib.import_module(module)
@@ -1337,7 +1422,7 @@ class MPICollectiveWorker(object):
                 f"MPICollectiveWorker: unknown collective mode {self.collective_mode}"
             )
 
-    def get_next_task(self) -> Tuple[str, Tuple[Any], Dict[Any, Any], str, int, int]:
+    def get_next_task(self) -> tuple[str, tuple[Any], dict[Any, Any], str, int, int]:
         if self.collective_mode == CollectiveMode.Gather:
             req = self.merged_comm.Ibarrier()
             (
@@ -1364,7 +1449,7 @@ class MPICollectiveWorker(object):
         self.comm.Abort()
 
 
-class MPICollectiveBroker(object):
+class MPICollectiveBroker:
     def __init__(
         self,
         worker_id: int,
@@ -1372,7 +1457,7 @@ class MPICollectiveBroker(object):
         group_comm: Intracomm,
         merged_comm: Intracomm,
         nprocs_per_worker: int,
-        ready_data: Optional[Any] = None,
+        ready_data: Any | None = None,
         is_worker: bool = False,
         collective_mode: CollectiveMode = CollectiveMode.Gather,
     ) -> None:
@@ -1404,11 +1489,15 @@ class MPICollectiveBroker(object):
         self.ready_data = ready_data
         logger.info(f"MPI collective broker {self.worker_id}: initialized.")
 
-    def serve(self) -> None:
+    def serve(self) -> MessageTag:
         """
         Broker and serve submitted calls until told to finish. A task
         is received from the controller and sent to all collective
         workers associated with this broker via scatter.
+
+        The end of a session and the final exit are relayed to the
+        collective workers in the same way.  Returns the tag that ended
+        serving: MessageTag.SESSION_END or MessageTag.EXIT.
 
         Call this function if workers need to perform initialization
         different from the controller, like this:
@@ -1450,7 +1539,11 @@ class MPICollectiveBroker(object):
             if tag == MessageTag.EXIT.value:
                 logger.info(f"MPI collective broker {self.worker_id}: exiting...")
                 self.scatter_task("exit", (), {}, "", 0, 0)
-                break
+                return MessageTag.EXIT
+            elif tag == MessageTag.SESSION_END.value:
+                logger.info(f"MPI collective broker {self.worker_id}: session ended.")
+                self.scatter_task("session_end", (), {}, "", 0, 0)
+                return MessageTag.SESSION_END
             elif tag == MessageTag.TASK.value:
                 (name_to_call, args, kwargs, module, time_est, task_id) = data
             else:
@@ -1528,8 +1621,8 @@ class MPICollectiveBroker(object):
     def scatter_task(
         self,
         name_to_call: str,
-        args: Tuple[Any],
-        kwargs: Dict[Any, Any],
+        args: tuple[Any],
+        kwargs: dict[Any, Any],
         module: str,
         time_est: int,
         task_id: int,
@@ -1563,7 +1656,7 @@ class MPICollectiveBroker(object):
 
     def gather_results(
         self, this_result: Any, this_stat: Any
-    ) -> Tuple[List[Any], List[Dict[str, Union[int, float, float64]]]]:
+    ) -> tuple[list[Any], list[dict[str, int | float | float64]]]:
         merged_rank = self.merged_comm.Get_rank()
         if self.collective_mode == CollectiveMode.Gather:
             req = self.merged_comm.Ibarrier()
@@ -1606,7 +1699,7 @@ class MPICollectiveBroker(object):
 
     def process(
         self,
-    ) -> Tuple[int, Union[None, Tuple[str, Tuple[int], Dict[Any, Any], str, int, int]]]:
+    ) -> tuple[int, None | tuple[str, tuple[int], dict[Any, Any], str, int, int]]:
         # Blocks until the controller sends something.
         status = MPI.Status()
         self.comm.Probe(source=0, tag=MPI.ANY_TAG, status=status)
@@ -1622,9 +1715,9 @@ class MPICollectiveBroker(object):
 
 
 def do_spawn_workers(
-    fun: Optional[Callable],
-    fun_name: Optional[str],
-    module_name: Optional[str],
+    fun: Callable | None,
+    fun_name: str | None,
+    module_name: str | None,
     world_comm: Intracomm,
     group_comm: Intracomm,
     worker_id: int,
@@ -1634,12 +1727,12 @@ def do_spawn_workers(
     collective_mode: str,
     enable_worker_service: bool,
     worker_service_name: str,
-    spawn_args: List[Any],
+    spawn_args: list[Any],
     sequential_spawn: bool,
     spawn_startup_wait: int,
-    spawn_executable: Optional[str],
+    spawn_executable: str | None,
     verbose: bool,
-) -> Tuple[Intercomm, Intracomm, CollectiveMode]:
+) -> tuple[Intercomm, Intracomm, CollectiveMode]:
     worker_config = {
         "worker_id": worker_id,
         "n_workers": n_workers,
@@ -1698,9 +1791,9 @@ def do_spawn_workers(
 
 
 def do_split_workers(
-    fun: Optional[Callable],
-    fun_name: Optional[str],
-    module_name: Optional[str],
+    fun: Callable | None,
+    fun_name: str | None,
+    module_name: str | None,
     world_comm: Intracomm,
     group_comm: Intracomm,
     worker_id: int,
@@ -1709,9 +1802,9 @@ def do_split_workers(
     broker_is_worker: bool,
     collective_mode: str,
     is_broker: bool,
-    broker_ranks: Tuple[int],
+    broker_ranks: tuple[int],
     verbose: bool,
-) -> Tuple[Intracomm, Intracomm, CollectiveMode]:
+) -> tuple[Intracomm, Intracomm, CollectiveMode]:
     worker_config = {
         "worker_id": worker_id,
         "n_workers": n_workers,
@@ -1741,7 +1834,7 @@ def do_split_workers(
         this_worker_ranks = set(
             range((worker_id - 1) * nprocs_per_worker, worker_id * nprocs_per_worker)
         )
-        this_broker_rank = tuple(this_worker_ranks)[0]
+        this_broker_rank = next(iter(this_worker_ranks))
     else:
         this_worker_ranks = set(
             range(
@@ -1764,7 +1857,7 @@ def do_split_workers(
     local_comm = group_comm.Split(color, key=group_comm.rank)
     if is_broker:
         local_leader = 0
-        remote_leader = tuple(this_worker_ranks)[0]
+        remote_leader = next(iter(this_worker_ranks))
     else:
         local_leader = 0
         remote_leader = this_broker_rank
@@ -1797,7 +1890,7 @@ def do_split_workers(
 
 def get_group_comm(
     world_comm: Intracomm, size: int, rank: int, is_controller: bool, spawned: bool
-) -> Tuple[int, Intracomm]:
+) -> tuple[int, Intracomm]:
     group_id = 0
     group_comm = None
     if not spawned and (size > 1):
@@ -1814,7 +1907,7 @@ def get_group_comm(
     return group_id, group_comm
 
 
-def get_fun(fun_name: Optional[str], module_name: str) -> Optional[Callable]:
+def get_fun(fun_name: str | None, module_name: str) -> Callable | None:
     fun = None
     if fun_name is not None:
         if module_name not in sys.modules:
@@ -1903,7 +1996,7 @@ def check_split_config(
                 )
 
 
-def run_spawn_group(
+def setup_spawn_group(
     worker_id,
     spawn_workers,
     nprocs_per_worker,
@@ -1925,6 +2018,12 @@ def run_spawn_group(
     spawn_executable,
     verbose,
 ):
+    """Spawn this broker's collective workers and return the broker.
+
+    Performs every collective step of spawn-based grouping, including the
+    optional initialization functions, but does not start serving.  Call
+    serve() on the returned broker to do that.
+    """
     check_spawn_config(
         spawn_workers,
         nprocs_per_worker,
@@ -1932,7 +2031,7 @@ def run_spawn_group(
         enable_worker_service,
         broker_fun,
     )
-    sub_comm, merged_comm, collective_mode_arg = do_spawn_workers(
+    _sub_comm, merged_comm, collective_mode_arg = do_spawn_workers(
         fun,
         fun_name,
         module_name,
@@ -1968,10 +2067,56 @@ def run_spawn_group(
             fun(broker, *args)
     if broker_fun is not None:
         broker_fun(broker, *args)
-    broker.serve()
+    return broker
 
 
-def run_split_group(
+def run_spawn_group(
+    worker_id,
+    spawn_workers,
+    nprocs_per_worker,
+    broker_is_worker,
+    broker_fun,
+    fun,
+    fun_name,
+    module_name,
+    args,
+    world_comm,
+    group_comm,
+    n_workers,
+    collective_mode,
+    enable_worker_service,
+    worker_service_name,
+    spawn_args,
+    sequential_spawn,
+    spawn_startup_wait,
+    spawn_executable,
+    verbose,
+):
+    setup_spawn_group(
+        worker_id,
+        spawn_workers,
+        nprocs_per_worker,
+        broker_is_worker,
+        broker_fun,
+        fun,
+        fun_name,
+        module_name,
+        args,
+        world_comm,
+        group_comm,
+        n_workers,
+        collective_mode,
+        enable_worker_service,
+        worker_service_name,
+        spawn_args,
+        sequential_spawn,
+        spawn_startup_wait,
+        spawn_executable,
+        verbose,
+    ).serve()
+
+
+def setup_split_group(
     worker_id,
     n_workers,
     split_workers,
@@ -1990,6 +2135,14 @@ def run_split_group(
     collective_mode,
     verbose,
 ):
+    """Split this rank into its worker group and return its server.
+
+    Returns the broker on broker ranks and the collective worker on the
+    other ranks of the group.  Performs every collective step of
+    split-based grouping, including the optional initialization functions,
+    but does not start serving.  Call serve() on the returned object to
+    do that.
+    """
     broker = None
     worker = None
     check_split_config(
@@ -1999,7 +2152,7 @@ def run_split_group(
         broker_fun,
         world_comm.size,
     )
-    sub_comm, local_comm, merged_comm, collective_mode_arg = do_split_workers(
+    _sub_comm, local_comm, merged_comm, collective_mode_arg = do_split_workers(
         fun,
         fun_name,
         module_name,
@@ -2048,30 +2201,294 @@ def run_split_group(
     if is_broker:
         if broker_fun is not None:
             broker_fun(broker, *args)
-        broker.serve()
-    else:
-        worker.serve()
+        return broker
+    return worker
+
+
+def run_split_group(
+    worker_id,
+    n_workers,
+    split_workers,
+    is_broker,
+    broker_ranks,
+    nprocs_per_worker,
+    broker_is_worker,
+    broker_fun,
+    fun,
+    fun_name,
+    module_name,
+    args,
+    world_comm,
+    controller_worker_comm,
+    group_comm,
+    collective_mode,
+    verbose,
+):
+    setup_split_group(
+        worker_id,
+        n_workers,
+        split_workers,
+        is_broker,
+        broker_ranks,
+        nprocs_per_worker,
+        broker_is_worker,
+        broker_fun,
+        fun,
+        fun_name,
+        module_name,
+        args,
+        world_comm,
+        controller_worker_comm,
+        group_comm,
+        collective_mode,
+        verbose,
+    ).serve()
+
+
+@dataclass
+class Topology:
+    """The communicators and role of this rank after establish_topology().
+
+    role is one of:
+
+    - "controller": submits calls; controller_worker_comm connects it to
+      every worker, or to every broker under worker grouping.
+    - "worker": a single-process worker; server is its MPIWorker.
+    - "broker": relays calls to a worker group; server is its
+      MPICollectiveBroker.
+    - "collective_worker": a member of a split worker group that is not
+      its broker; server is its MPICollectiveWorker.
+    - "idle": a rank left out by max_workers; it takes no part in the work.
+
+    grouping_method is the method actually used, which can differ from
+    the requested one (see establish_topology).
+    """
+
+    role: str
+    grouping_method: GroupingMethod
+    controller_worker_comm: Intracomm | None = None
+    group_comm: Intracomm | None = None
+    group_id: int = 0
+    worker_id: int | None = None
+    server: Any = None
+
+
+def _worker_split_layout(group_comm, nprocs_per_worker, broker_is_worker):
+    """Return (number of groups, this rank's worker id, broker ranks) for a
+    split of group_comm into worker groups of nprocs_per_worker processes,
+    plus one extra broker process per group when brokers do not work."""
+    stride = nprocs_per_worker if broker_is_worker else nprocs_per_worker + 1
+    n_groups = group_comm.size // stride
+    worker_id = (group_comm.rank // stride) + 1
+    broker_ranks = {x * stride for x in range(n_groups)}
+    return n_groups, worker_id, broker_ranks
+
+
+def establish_topology(
+    worker_grouping_method: str | GroupingMethod = GroupingMethod.NoGrouping,
+    nprocs_per_worker: int = 1,
+    broker_is_worker: bool = False,
+    collective_mode: str = "gather",
+    enable_worker_service: bool = False,
+    worker_service_name: str = "distwq.init",
+    sequential_spawn: bool = False,
+    spawn_startup_wait: int | None = None,
+    spawn_executable: str | None = None,
+    spawn_args: list[Any] | None = None,
+    fun: Callable | None = None,
+    fun_name: str | None = None,
+    module_name: str = "__main__",
+    broker_fun: Callable | None = None,
+    args: tuple[Any] = (),
+    verbose: bool = False,
+) -> Topology:
+    """Set up the controller, workers and worker groups; call on every rank.
+
+    This is the one sequence of collective MPI calls shared by run() and
+    distwq.future.DistributedEnvironment, so that the controller and the
+    workers always make the same calls in the same order.  It:
+
+    1. checks the grouping configuration on every rank, before any
+       collective call, so an invalid configuration fails everywhere
+       instead of leaving the valid ranks waiting;
+    2. splits the world into the controller, the worker ranks and any
+       idle ranks (get_group_comm);
+    3. splits off the controller-worker communicator, joining the
+       controller with every worker, or with every broker under grouping;
+    4. sets up the worker groups, if any, and passes the barrier on the
+       controller-worker communicator that tells the controller every
+       worker is ready.
+
+    Under GroupSpawn or GroupSplit, fun, broker_fun and args are passed to
+    setup_spawn_group() or setup_split_group(), which call them on the
+    group's processes.  Without grouping they are not used here; run()
+    calls fun on each worker itself.
+
+    NoGrouping with nprocs_per_worker > 1 is treated as GroupSplit, as
+    run() has always done.
+
+    The returned servers have not started serving.  Call serve() on
+    Topology.server to do that.
+    """
+    method = check_worker_grouping_method(worker_grouping_method)
+    if method == GroupingMethod.NoGrouping and nprocs_per_worker > 1:
+        method = GroupingMethod.GroupSplit
+    if spawn_args is None:
+        spawn_args = []
+
+    if not has_mpi:
+        return Topology(role="controller", grouping_method=method)
+
+    world_size = world_comm.size
+    if world_size < 2 or n_workers < 1:
+        # No workers: the controller runs every call itself.
+        return Topology(
+            role="controller",
+            grouping_method=GroupingMethod.NoGrouping,
+            controller_worker_comm=world_comm,
+            group_comm=world_comm,
+        )
+
+    grouped = method in (GroupingMethod.GroupSpawn, GroupingMethod.GroupSplit)
+    if method == GroupingMethod.GroupSpawn:
+        check_spawn_config(
+            True, nprocs_per_worker, broker_is_worker, enable_worker_service, broker_fun
+        )
+    elif method == GroupingMethod.GroupSplit:
+        check_split_config(
+            True, nprocs_per_worker, broker_is_worker, broker_fun, world_size
+        )
+
+    group_id, group_comm = get_group_comm(
+        world_comm, world_size, rank, is_controller, spawned
+    )
+
+    if is_controller:
+        # Under grouping the controller shares color 1 with the brokers;
+        # otherwise color 0 with all workers.
+        controller_worker_comm = world_comm.Split(1 if grouped else 0, key=0)
+        controller_worker_comm.Ibarrier().wait()
+        return Topology(
+            role="controller",
+            grouping_method=method,
+            controller_worker_comm=controller_worker_comm,
+            group_comm=group_comm,
+            group_id=group_id,
+        )
+
+    if not is_worker:
+        # Left out by max_workers: take part in the Split, but in no
+        # communicator.
+        world_comm.Split(MPI.UNDEFINED, key=1)
+        return Topology(
+            role="idle",
+            grouping_method=method,
+            group_comm=group_comm,
+            group_id=group_id,
+        )
+
+    if method == GroupingMethod.GroupSpawn:
+        worker_id = group_comm.rank + 1
+        controller_worker_comm = world_comm.Split(1, key=1)
+        broker = setup_spawn_group(
+            worker_id,
+            True,
+            nprocs_per_worker,
+            broker_is_worker,
+            broker_fun,
+            fun,
+            fun_name,
+            module_name,
+            args,
+            controller_worker_comm,
+            group_comm,
+            group_comm.size,
+            collective_mode,
+            enable_worker_service,
+            worker_service_name,
+            spawn_args,
+            sequential_spawn,
+            spawn_startup_wait,
+            spawn_executable,
+            verbose,
+        )
+        return Topology(
+            role="broker",
+            grouping_method=method,
+            controller_worker_comm=controller_worker_comm,
+            group_comm=group_comm,
+            group_id=group_id,
+            worker_id=worker_id,
+            server=broker,
+        )
+
+    if method == GroupingMethod.GroupSplit:
+        n_groups, worker_id, broker_ranks = _worker_split_layout(
+            group_comm, nprocs_per_worker, broker_is_worker
+        )
+        is_broker = group_comm.rank in broker_ranks
+        controller_worker_comm = world_comm.Split(1 if is_broker else 2, key=1)
+        server = setup_split_group(
+            worker_id,
+            n_groups,
+            True,
+            is_broker,
+            tuple(broker_ranks),
+            nprocs_per_worker,
+            broker_is_worker,
+            broker_fun,
+            fun,
+            fun_name,
+            module_name,
+            args,
+            world_comm,
+            controller_worker_comm,
+            group_comm,
+            collective_mode,
+            verbose,
+        )
+        return Topology(
+            role="broker" if is_broker else "collective_worker",
+            grouping_method=method,
+            controller_worker_comm=controller_worker_comm if is_broker else None,
+            group_comm=group_comm,
+            group_id=group_id,
+            worker_id=worker_id,
+            server=server,
+        )
+
+    controller_worker_comm = world_comm.Split(0, key=1)
+    controller_worker_comm.Ibarrier().wait()
+    return Topology(
+        role="worker",
+        grouping_method=method,
+        controller_worker_comm=controller_worker_comm,
+        group_comm=group_comm,
+        group_id=group_id,
+        worker_id=group_comm.rank + 1,
+        server=MPIWorker(controller_worker_comm, group_comm),
+    )
 
 
 def run(
-    fun_name: Optional[str] = None,
+    fun_name: str | None = None,
     module_name: str = "__main__",
-    broker_fun_name: Optional[str] = None,
+    broker_fun_name: str | None = None,
     broker_module_name: str = "__main__",
     max_workers: int = -1,
-    worker_grouping_method: Union[str, GroupingMethod] = GroupingMethod.NoGrouping,
+    worker_grouping_method: str | GroupingMethod = GroupingMethod.NoGrouping,
     sequential_spawn: bool = False,
-    spawn_startup_wait: Optional[int] = None,
-    spawn_executable: Optional[str] = None,
-    spawn_args: List[Any] = [],
+    spawn_startup_wait: int | None = None,
+    spawn_executable: str | None = None,
+    spawn_args: list[Any] | None = None,
     nprocs_per_worker: int = 1,
     collective_mode: str = "gather",
     broker_is_worker: bool = False,
     worker_service_name: str = "distwq.init",
     enable_worker_service: bool = False,
-    time_limit: Optional[int] = None,
+    time_limit: int | None = None,
     verbose: bool = False,
-    args: Tuple[Any] = (),
+    args: tuple[Any] = (),
 ) -> None:
     """Run in controller/worker mode until fun(controller/worker) finishes.
 
@@ -2117,8 +2534,10 @@ def run(
 
     """
 
-    logging.basicConfig(level=logging.INFO if verbose else logging.WARN)
+    logging.basicConfig(level=logging.INFO if verbose else logging.WARNING)
 
+    if spawn_args is None:
+        spawn_args = []
     assert nprocs_per_worker > 0
     assert not spawned
 
@@ -2134,43 +2553,32 @@ def run(
 
     results = None
     if has_mpi:  # run in mpi mode
-        spawn_workers = (
-            (worker_grouping_method == GroupingMethod.GroupSpawn)
-            and (n_workers > 0)
-            and (nprocs_per_worker > 0)
+        topology = establish_topology(
+            worker_grouping_method=worker_grouping_method,
+            nprocs_per_worker=nprocs_per_worker,
+            broker_is_worker=broker_is_worker,
+            collective_mode=collective_mode,
+            enable_worker_service=enable_worker_service,
+            worker_service_name=worker_service_name,
+            sequential_spawn=sequential_spawn,
+            spawn_startup_wait=spawn_startup_wait,
+            spawn_executable=spawn_executable,
+            spawn_args=spawn_args,
+            fun=fun,
+            fun_name=fun_name,
+            module_name=module_name,
+            broker_fun=broker_fun,
+            args=args,
+            verbose=verbose,
         )
-        split_workers = (
-            (
-                (worker_grouping_method == GroupingMethod.GroupSplit)
-                or (
-                    (worker_grouping_method == GroupingMethod.NoGrouping)
-                    and (nprocs_per_worker > 1)
-                )
-            )
-            and (n_workers > 0)
-            and (nprocs_per_worker > 0)
-        )
-        group_id, group_comm = get_group_comm(
-            world_comm, size, rank, is_controller, spawned
-        )
-        if is_controller:  # I'm the controller
+        if topology.role == "controller":
             assert fun is not None
-            controller_worker_comm = world_comm
-            if split_workers or spawn_workers:
-                color = 1 if is_controller else 2
-                controller_worker_comm = world_comm.Split(
-                    color, key=0 if is_controller else 1
-                )
-            elif size > 1:
-                controller_worker_comm = world_comm.Split(
-                    0, key=0 if is_controller else 1
-                )
-            controller = MPIController(controller_worker_comm, time_limit=time_limit)
+            controller = MPIController(
+                topology.controller_worker_comm, time_limit=time_limit
+            )
             previous_sigint = signal.signal(
                 signal.SIGINT, lambda signum, frame: controller.abort()
             )
-            req = controller_worker_comm.Ibarrier()
-            req.wait()
             try:  # put everything in a try block to be able to exit!
                 results = fun(controller, *args)
             except ValueError:
@@ -2183,84 +2591,16 @@ def run(
                 signal.SIGINT,
                 previous_sigint if previous_sigint is not None else signal.SIG_DFL,
             )
-        elif is_worker and spawn_workers:  # I'm a broker
-            worker_id = group_comm.rank + 1
-            is_broker = True
-            color = 1 if is_broker or is_controller else 2
-            controller_worker_comm = world_comm.Split(
-                color, key=0 if is_controller else 1
-            )
-            run_spawn_group(
-                worker_id,
-                spawn_workers,
-                nprocs_per_worker,
-                broker_is_worker,
-                broker_fun,
-                fun,
-                fun_name,
-                module_name,
-                args,
-                controller_worker_comm,
-                group_comm,
-                n_workers,
-                collective_mode,
-                enable_worker_service,
-                worker_service_name,
-                spawn_args,
-                sequential_spawn,
-                spawn_startup_wait,
-                spawn_executable,
-                verbose,
-            )
-        elif is_worker and split_workers:  # I'm a broker or a worker
-            if broker_is_worker:
-                n_workers = group_comm.size // nprocs_per_worker
-                worker_id = (group_comm.rank // nprocs_per_worker) + 1
-                broker_set = {(x * nprocs_per_worker) for x in range(n_workers)}
-            else:
-                n_workers = group_comm.size // (nprocs_per_worker + 1)
-                worker_id = (group_comm.rank // (nprocs_per_worker + 1)) + 1
-                broker_set = {(x * (nprocs_per_worker + 1)) for x in range(n_workers)}
-            is_broker = group_comm.rank in broker_set
-            color = 1 if is_broker or is_controller else 2
-            controller_worker_comm = world_comm.Split(
-                color, key=0 if is_controller else 1
-            )
-            run_split_group(
-                worker_id,
-                n_workers,
-                split_workers,
-                is_broker,
-                tuple(broker_set),
-                nprocs_per_worker,
-                broker_is_worker,
-                broker_fun,
-                fun,
-                fun_name,
-                module_name,
-                args,
-                world_comm,
-                controller_worker_comm,
-                group_comm,
-                collective_mode,
-                verbose,
-            )
-
-        elif is_worker:  # I'm a worker
-            worker_id = rank
-            controller_worker_comm = (
-                world_comm.Split(0, key=0 if is_controller else 1)
-                if size > 1
-                else world_comm
-            )
-            req = controller_worker_comm.Ibarrier()
-            req.wait()
-            worker = MPIWorker(controller_worker_comm, group_comm)
+        elif topology.role == "worker":
+            worker = topology.server
             if fun is not None:
                 fun(worker, *args)
             worker.serve()
+        elif topology.role in ("broker", "collective_worker"):
+            # Worker groups already ran fun and broker_fun during setup.
+            topology.server.serve()
         else:
-            raise RuntimeError("distwq.run: invalid worker configuration")
+            logger.info(f"distwq.run: rank {rank} is not needed as a worker.")
 
     else:  # run as single processor
         assert fun is not None
@@ -2279,11 +2619,11 @@ def worker_main():
         enable_worker_service = my_config["enable_worker_service"]
         worker_service_name = my_config["worker_service_name"]
         verbose_flag = my_config["verbose"]
-        verbose = True if verbose_flag == 1 else False
+        verbose = verbose_flag == 1
         if verbose:
             logging.basicConfig(level=logging.INFO)
         else:
-            logging.basicConfig(level=logging.WARN)
+            logging.basicConfig(level=logging.WARNING)
         logger.info(f"MPI collective worker {worker_id}-{rank} starting")
         logger.info(f"MPI collective worker {worker_id}-{rank} args: {my_args}")
 
@@ -2323,7 +2663,10 @@ def worker_main():
             if enable_worker_service:
                 worker.connect_service(n_lookup_attempts=5)
             fun(worker, *args)
-        worker.serve()
+        # A spawned worker runs no user code between sessions, so it simply
+        # serves again after each session until told to exit.
+        while worker.serve() != MessageTag.EXIT:
+            pass
         MPI.Finalize()
 
 

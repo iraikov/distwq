@@ -45,6 +45,7 @@ class FakeController:
         self.arrivals = deque()
         self.values = values or {}
         self.process_calls = []
+        self.end_session_calls = 0
 
     def submit_call(self, name_to_call, args=(), kwargs=None, module_name="", **kw):
         task_id = self.count
@@ -70,6 +71,9 @@ class FakeController:
             task_id = self.result_queue.pop(0)
             ret.append((task_id, self.results.pop(task_id)))
         return ret
+
+    def end_session(self):
+        self.end_session_calls += 1
 
 
 @pytest.fixture
@@ -189,6 +193,18 @@ def test_close_resolves_pending_and_is_idempotent(controller):
     assert all(f._done for f in futures)
     assert ctl._pending == {}
     ctl._close()
+
+
+def test_close_ends_session_once_after_results(controller):
+    ctl, fake = controller
+    f = ctl.submit(square, 1)
+    fake.arrivals.append([f.task_id])
+
+    ctl._close()
+    assert f._done
+    assert fake.end_session_calls == 1
+    ctl._close()
+    assert fake.end_session_calls == 1
 
 
 def test_close_fails_futures_unknown_to_controller(controller):
