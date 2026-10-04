@@ -75,3 +75,31 @@ def test_large_payload_round_trips_across_multiple_messages(monkeypatch):
             module_name="test_distwq",
             verbose=True,
         )
+
+
+def main_release(controller):
+    """Each getter hands a result out once and keeps no reference to it."""
+    ids = [
+        controller.submit_call("do_work", (x,), module_name="test_distwq")
+        for x in range(1, 7)
+    ]
+    controller.get_next_result()
+    controller.get_result(ids[1])
+    controller.probe_next_result()
+    controller.probe_all_next_results()
+    assert controller.results == {}
+
+
+def test_results_are_released_once_retrieved():
+    if distwq.is_controller:
+        distwq.run(
+            fun_name="main_release",
+            module_name="test_distwq",
+            verbose=True,
+        )
+    else:
+        distwq.run(
+            fun_name="init",
+            module_name="test_distwq",
+            verbose=True,
+        )
