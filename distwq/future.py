@@ -1,6 +1,7 @@
 # Future-based distributed task management with Two-Phase Iterator design
 
 import logging
+import sys
 import time
 from collections.abc import Callable, Iterable, Iterator
 from typing import (
@@ -17,6 +18,7 @@ try:
         MessageTag,
         MPIController,
         Topology,
+        controller_rank,
         establish_topology,
         has_mpi,
         is_controller,
@@ -32,6 +34,7 @@ except ImportError:
         MessageTag,
         MPIController,
         Topology,
+        controller_rank,
         establish_topology,
         has_mpi,
         is_controller,
@@ -101,6 +104,41 @@ logger = logging.getLogger(__name__)
 
 FIRST_COMPLETED = "FIRST_COMPLETED"
 ALL_COMPLETED = "ALL_COMPLETED"
+
+
+def task_reference(func: Callable) -> tuple[str, str]:
+    """Return (name, module) by which a worker can look up func.
+
+    Tasks are sent to workers by name, and each worker finds the callable
+    again by evaluating that name in the module's namespace.  This only
+    works for functions, classes and static methods defined at module
+    level, or as attributes of module-level classes.  Anything else, such
+    as a lambda, a function defined inside another function, or a
+    functools.partial, raises TypeError here, on the controller, instead
+    of failing later on a worker.
+    """
+    name = getattr(func, "__qualname__", None)
+    module_name = getattr(func, "__module__", None)
+    if name is None or module_name is None:
+        raise TypeError(
+            f"{func!r} cannot be sent to workers: only module-level functions "
+            "and classes can be submitted"
+        )
+    if "<lambda>" in name or "<locals>" in name:
+        raise TypeError(
+            f"{name} cannot be sent to workers: lambdas and functions defined "
+            "inside other functions cannot be looked up by name; define it at "
+            f"module level in {module_name}"
+        )
+    found = sys.modules.get(module_name)
+    for part in name.split("."):
+        found = getattr(found, part, None)
+    if found is not func and getattr(found, "__func__", None) is not func:
+        raise TypeError(
+            f"{name} cannot be sent to workers: it is not reachable as "
+            f"{module_name}.{name}"
+        )
+    return name, module_name
 
 
 class DistributedFuture(Generic[R]):
@@ -213,30 +251,31 @@ class TaskController:
         self.poll_interval = 0.01
         self._closed = False
 
-    def submit(
-        self, func: Callable[..., R], *args, timeout: int | None = None, **kwargs
+    def submit(self, func: Callable[..., R], *args, **kwargs) -> DistributedFuture[R]:
+        """Submit func(*args, **kwargs) for distributed execution.
+
+        func must be defined at module level (see task_reference()).
+        """
+        return self._submit_one(func, args, kwargs)
+
+    def _submit_one(
+        self, func: Callable[..., R], args: tuple, kwargs: dict
     ) -> DistributedFuture[R]:
-        """Submit a single task for distributed execution"""
         if not self._controller:
             raise RuntimeError("No controller available for task submission")
-
-        # Determine effective worker group size
-        effective_group_size = (
+        name, module_name = task_reference(func)
+        group_size = (
             self._env.worker_config.nprocs_per_worker if self._env.worker_config else 1
         )
-
         task_id = self._controller.submit_call(
-            func.__name__,
+            name,
             args=args,
             kwargs=kwargs,
-            module_name=func.__module__,
+            module_name=module_name,
             time_est=self._estimate_task_time(func, args, kwargs),
         )
         logger.info(f"Submitted task id {task_id}")
-
-        future = DistributedFuture(
-            task_id, self, worker_group_size=effective_group_size
-        )
+        future = DistributedFuture(task_id, self, worker_group_size=group_size)
         self._setup_future_completion(future)
         return future
 
@@ -273,26 +312,14 @@ class TaskController:
     def batch_submit(
         self, tasks: list[tuple[Callable, tuple, dict]]
     ) -> list[DistributedFuture]:
-        """Submit multiple tasks efficiently"""
-        if not self._controller:
-            raise RuntimeError("No controller available for task submission")
+        """Submit (func, args, kwargs) tasks; return their futures in order.
 
-        futures = []
-        for task in tasks:
-            func, args, kwargs = task
-            task_id = self._controller.submit_call(
-                func.__name__,
-                args=args,
-                kwargs=kwargs,
-                module_name=func.__module__,
-                time_est=self._estimate_task_time(func, args, kwargs),
-            )
-
-            future = DistributedFuture(task_id, self, worker_group_size=1)
-            self._setup_future_completion(future)
-            futures.append(future)
-
-        return futures
+        Every callable is checked before any task is submitted, so a bad
+        one submits nothing.
+        """
+        for func, _args, _kwargs in tasks:
+            task_reference(func)
+        return [self._submit_one(func, args, kwargs) for func, args, kwargs in tasks]
 
     def active_worker_count(self) -> int:
         """Get the number of active workers"""
@@ -615,6 +642,20 @@ class DistributedEnvironment:
         if tag == MessageTag.EXIT:
             self._exit_received = True
         return tag
+
+    def broadcast(self, value: Any = None) -> Any:
+        """Return the controller's value on every rank; all ranks must call.
+
+        Call it inside the environment but outside any session, for
+        example right after the session loop, so that every rank reaches
+        it.  The value given on worker ranks is ignored.
+        """
+        if not self._active:
+            raise RuntimeError("broadcast() must be called inside the environment")
+        if not has_mpi or world_comm.size < 2:
+            return value
+        payload = value if self.role == "controller" else None
+        return world_comm.bcast(payload, root=controller_rank)
 
     def is_active(self) -> bool:
         """Check if the distributed environment is active"""
