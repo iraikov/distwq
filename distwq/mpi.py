@@ -215,6 +215,60 @@ def multiple_task_arguments(N, args, kwargs, task_ids, workers):
     return args, kwargs, task_ids, workers
 
 
+def task_failure(exc: BaseException) -> dict[str, Any]:
+    """Describe a task's exception in built-in types only.
+
+    Sent to the controller in place of the task's result.  Only built-in
+    types are used, so the description can be unpickled anywhere, even
+    when the worker runs its code as __main__.  "pickled" holds the
+    exception itself when it can be pickled, and None otherwise.
+    """
+    try:
+        pickled = pickle.dumps(exc)
+    except Exception:  # noqa: BLE001 - any pickling failure means "not picklable"
+        pickled = None
+    return {
+        "distwq_failure": True,
+        "type": f"{type(exc).__module__}.{type(exc).__qualname__}",
+        "message": str(exc),
+        "traceback": traceback.format_exc(),
+        "pickled": pickled,
+        "world_rank": world_comm.rank if has_mpi else 0,
+    }
+
+
+def call_task(
+    name_to_call: str,
+    module: str,
+    args: tuple[Any],
+    kwargs: dict[Any, Any],
+    capture_errors: bool,
+) -> tuple[Any, bool]:
+    """Look up a task's callable by module and name, call it, and return
+    (result, failed).
+
+    With capture_errors=True an exception raised while looking up or
+    calling the task is caught and returned as (task_failure(exc), True),
+    so that the serving loop can report it and carry on.  Otherwise the
+    exception propagates, and the module's exception hook aborts the job
+    as it always has.
+    """
+    try:
+        if module not in sys.modules:
+            importlib.import_module(module)
+        try:
+            object_to_call = eval(name_to_call, sys.modules[module].__dict__)
+        except NameError:
+            logger.error(str(sys.modules[module].__dict__.keys()))
+            raise
+        return object_to_call(*args, **kwargs), False
+    except Exception as exc:
+        if not capture_errors:
+            raise
+        logger.error(f"task {name_to_call} in {module} failed: {exc!r}")
+        return task_failure(exc), True
+
+
 class MPIController:
     def __init__(self, comm: Intracomm, time_limit: Any = None) -> None:
         size = comm.size
@@ -279,6 +333,12 @@ class MPIController:
         call.  On worker i, only total_time[i] is available.
         """
         self.results = {}
+        self.failed_tasks: set[int] = set()
+        """
+        (set) ids of finished calls whose result is a task_failure()
+        description rather than a return value; only workers created with
+        capture_errors=True report failures.
+        """
         """
         (dictionary)
         if mpi is not available, the result of submit_call(..., id=a) will be
@@ -343,6 +403,8 @@ class MPIController:
                 )
 
                 self.results[task_id] = results
+                if stats is not None and stats.get("error"):
+                    self.failed_tasks.add(task_id)
                 self.stats.append(stats)
                 self.n_processed[worker] = stats["n_processed"]
                 self.total_time[worker] = stats["total_time"]
@@ -1123,7 +1185,11 @@ class MPIController:
 
 class MPIWorker:
     def __init__(
-        self, comm: Intracomm, group_comm: Intracomm, ready_data: Any | None = None
+        self,
+        comm: Intracomm,
+        group_comm: Intracomm,
+        ready_data: Any | None = None,
+        capture_errors: bool = False,
     ) -> None:
         size = comm.size
         rank = comm.rank
@@ -1140,6 +1206,8 @@ class MPIWorker:
         self.total_time[rank] = 0
         self.stats = []
         self.ready_data = None
+        # Report task exceptions to the controller instead of aborting.
+        self.capture_errors = capture_errors
 
         logger.info(f"MPI worker {self.worker_id}: initialized.")
 
@@ -1183,7 +1251,6 @@ class MPIWorker:
             tag = status.Get_tag()
             data = self.comm.recv(source=0, tag=tag)
 
-            object_to_call = None
             if tag == MessageTag.EXIT.value:
                 logger.info(f"MPI worker {self.worker_id}: exiting...")
                 return MessageTag.EXIT
@@ -1191,21 +1258,16 @@ class MPIWorker:
                 logger.info(f"MPI worker {self.worker_id}: session ended.")
                 return MessageTag.SESSION_END
             elif tag == MessageTag.TASK.value:
-                try:
-                    (name_to_call, args, kwargs, module, time_est, task_id) = data
-                    if module not in sys.modules:
-                        importlib.import_module(module)
-                    object_to_call = eval(name_to_call, sys.modules[module].__dict__)
-                except NameError:
-                    logger.error(str(sys.modules[module].__dict__.keys()))
-                    raise
+                (name_to_call, args, kwargs, module, time_est, task_id) = data
             else:
                 raise RuntimeError(
                     f"MPI worker {self.worker_id}: unknown message tag {tag}"
                 )
             self.total_time_est[rank] += time_est
             call_time = time.time()
-            result = object_to_call(*args, **kwargs)
+            result, failed = call_task(
+                name_to_call, module, args, kwargs, self.capture_errors
+            )
             this_time = time.time() - call_time
             self.n_processed[rank] += 1
             self.stats.append(
@@ -1216,6 +1278,7 @@ class MPIWorker:
                     "time_over_est": this_time / time_est,
                     "n_processed": self.n_processed[rank],
                     "total_time": time.time() - start_time,
+                    "error": failed,
                 }
             )
             _isend_bytes(
@@ -1243,11 +1306,15 @@ class MPICollectiveWorker:
         n_workers: int,
         worker_service_name: str = "distwq.init",
         collective_mode: CollectiveMode = CollectiveMode.Gather,
+        capture_errors: bool = False,
     ):
         size = comm.size
         rank = comm.rank
 
         self.collective_mode = collective_mode
+        # Report task exceptions to the broker instead of aborting; the
+        # broker passes them on to the controller.
+        self.capture_errors = capture_errors
         self.n_workers = n_workers
         self.worker_id = worker_id
         self.comm = comm
@@ -1381,17 +1448,14 @@ class MPICollectiveWorker:
                     MPI.Close_port(self.worker_port)
                 self.merged_comm.Disconnect()
                 return MessageTag.EXIT
-            try:
-                if module not in sys.modules:
-                    importlib.import_module(module)
-                object_to_call = eval(name_to_call, sys.modules[module].__dict__)
-            except NameError:
-                logger.error(str(sys.modules[module].__dict__.keys()))
-                raise
             self.total_time_est[rank] += time_est
             call_time = time.time()
 
-            result = object_to_call(*args, **kwargs)
+            # A failure is still gathered like a result, so that the
+            # broker and the other workers are not left waiting.
+            result, failed = call_task(
+                name_to_call, module, args, kwargs, self.capture_errors
+            )
             this_time = time.time() - call_time
             self.n_processed[rank] += 1
             self.stats.append(
@@ -1402,6 +1466,7 @@ class MPICollectiveWorker:
                     "time_over_est": this_time / time_est,
                     "n_processed": self.n_processed[rank],
                     "total_time": time.time() - start_time,
+                    "error": failed,
                 }
             )
             self.gather_results(result)
@@ -1460,6 +1525,7 @@ class MPICollectiveBroker:
         ready_data: Any | None = None,
         is_worker: bool = False,
         collective_mode: CollectiveMode = CollectiveMode.Gather,
+        capture_errors: bool = False,
     ) -> None:
         logger.info(f"MPI collective broker {worker_id} starting")
         assert not spawned
@@ -1487,6 +1553,9 @@ class MPICollectiveBroker:
         self.is_worker = is_worker
         self.is_broker = True
         self.ready_data = ready_data
+        # Report task exceptions, its own or its workers', to the
+        # controller instead of aborting.
+        self.capture_errors = capture_errors
         logger.info(f"MPI collective broker {self.worker_id}: initialized.")
 
     def serve(self) -> MessageTag:
@@ -1560,25 +1629,12 @@ class MPICollectiveBroker:
 
             self.total_time_est[rank] += time_est
             if self.is_worker:
-                object_to_call = None
-                try:
-                    if module not in sys.modules:
-                        importlib.import_module(module)
-                    object_to_call = eval(name_to_call, sys.modules[module].__dict__)
-                except NameError:
-                    logger.error(str(sys.modules[module].__dict__.keys()))
-                    raise
-
                 call_time = time.time()
-                try:
-                    this_result = object_to_call(*args, **kwargs)
-                except Exception as e:
-                    logger.error(
-                        f"MPI collective broker {self.worker_id}: "
-                        f"call to {name_to_call} failed with error: {e}"
-                    )
-                    raise
-
+                # A failure is still gathered like a result, so that the
+                # collective workers are not left waiting.
+                this_result, failed = call_task(
+                    name_to_call, module, args, kwargs, self.capture_errors
+                )
                 this_time = time.time() - call_time
                 self.n_processed[merged_rank] += 1
                 this_stat = {
@@ -1588,6 +1644,7 @@ class MPICollectiveBroker:
                     "time_over_est": this_time / time_est,
                     "n_processed": self.n_processed[merged_rank],
                     "total_time": time.time() - start_time,
+                    "error": failed,
                 }
             else:
                 this_result = None
@@ -1607,6 +1664,15 @@ class MPICollectiveBroker:
                 stat = stats[max_time]
             else:
                 stat = None
+            if any(s.get("error") for s in stats):
+                # Report the group's first failure in place of its
+                # results, flagged in the stats sent with it.
+                results = next(
+                    r
+                    for r in results
+                    if isinstance(r, dict) and r.get("distwq_failure")
+                )
+                stat = dict(stat, error=True)
             logger.info(
                 f"MPI collective broker {self.worker_id}: "
                 "sending results to controller..."
@@ -1732,6 +1798,7 @@ def do_spawn_workers(
     spawn_startup_wait: int,
     spawn_executable: str | None,
     verbose: bool,
+    capture_errors: bool = False,
 ) -> tuple[Intercomm, Intracomm, CollectiveMode]:
     worker_config = {
         "worker_id": worker_id,
@@ -1740,6 +1807,7 @@ def do_spawn_workers(
         "enable_worker_service": enable_worker_service,
         "worker_service_name": worker_service_name,
         "verbose": verbose,
+        "capture_errors": capture_errors,
     }
     if fun is not None:
         worker_config["init_fun_name"] = str(fun_name)
@@ -2017,8 +2085,12 @@ def setup_spawn_group(
     spawn_startup_wait,
     spawn_executable,
     verbose,
+    capture_errors=False,
 ):
     """Spawn this broker's collective workers and return the broker.
+
+    With capture_errors=True the broker and its workers report task
+    exceptions to the controller instead of aborting.
 
     Performs every collective step of spawn-based grouping, including the
     optional initialization functions, but does not start serving.  Call
@@ -2049,6 +2121,7 @@ def setup_spawn_group(
         spawn_startup_wait,
         spawn_executable,
         verbose,
+        capture_errors=capture_errors,
     )
     broker = MPICollectiveBroker(
         worker_id,
@@ -2058,6 +2131,7 @@ def setup_spawn_group(
         nprocs_per_worker,
         is_worker=broker_is_worker,
         collective_mode=collective_mode_arg,
+        capture_errors=capture_errors,
     )
     if fun is not None:
         req = merged_comm.Ibarrier()
@@ -2134,8 +2208,12 @@ def setup_split_group(
     group_comm,
     collective_mode,
     verbose,
+    capture_errors=False,
 ):
     """Split this rank into its worker group and return its server.
+
+    With capture_errors=True the group reports task exceptions to the
+    controller instead of aborting.
 
     Returns the broker on broker ranks and the collective worker on the
     other ranks of the group.  Performs every collective step of
@@ -2178,6 +2256,7 @@ def setup_split_group(
             nprocs_per_worker,
             is_worker=broker_is_worker,
             collective_mode=collective_mode_arg,
+            capture_errors=capture_errors,
         )
         req = controller_worker_comm.Ibarrier()
         req.wait()
@@ -2188,6 +2267,7 @@ def setup_split_group(
             worker_id,
             n_workers,
             collective_mode=collective_mode_arg,
+            capture_errors=capture_errors,
         )
 
     if fun is not None:
@@ -2301,6 +2381,7 @@ def establish_topology(
     broker_fun: Callable | None = None,
     args: tuple[Any] = (),
     verbose: bool = False,
+    capture_errors: bool = False,
 ) -> Topology:
     """Set up the controller, workers and worker groups; call on every rank.
 
@@ -2326,6 +2407,10 @@ def establish_topology(
 
     NoGrouping with nprocs_per_worker > 1 is treated as GroupSplit, as
     run() has always done.
+
+    With capture_errors=True every worker-side server reports a task's
+    exception to the controller in place of its result, instead of letting
+    it abort the job.  run() leaves this off.
 
     The returned servers have not started serving.  Call serve() on
     Topology.server to do that.
@@ -2411,6 +2496,7 @@ def establish_topology(
             spawn_startup_wait,
             spawn_executable,
             verbose,
+            capture_errors=capture_errors,
         )
         return Topology(
             role="broker",
@@ -2446,6 +2532,7 @@ def establish_topology(
             group_comm,
             collective_mode,
             verbose,
+            capture_errors=capture_errors,
         )
         return Topology(
             role="broker" if is_broker else "collective_worker",
@@ -2466,7 +2553,9 @@ def establish_topology(
         group_comm=group_comm,
         group_id=group_id,
         worker_id=group_comm.rank + 1,
-        server=MPIWorker(controller_worker_comm, group_comm),
+        server=MPIWorker(
+            controller_worker_comm, group_comm, capture_errors=capture_errors
+        ),
     )
 
 
@@ -2646,6 +2735,7 @@ def worker_main():
             n_workers,
             collective_mode=collective_mode_arg,
             worker_service_name=worker_service_name,
+            capture_errors=bool(my_config.get("capture_errors", False)),
         )
         fun = None
         if "init_fun_name" in my_config:

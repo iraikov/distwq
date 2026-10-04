@@ -100,7 +100,7 @@ def test_result_arriving_before_registration_is_kept(controller):
     task_id = fake.submit_call("square")
     fake.arrivals.append([task_id])
     ctl._pump(block=False)
-    assert ctl._orphans == {task_id: ("value", task_id)}
+    assert ctl._orphans == {task_id: (("value", task_id), False)}
 
     f = DistributedFuture(task_id, ctl)
     ctl._setup_future_completion(f)

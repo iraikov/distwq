@@ -1,6 +1,7 @@
 # Future-based distributed task management with Two-Phase Iterator design
 
 import logging
+import pickle
 import sys
 import time
 from collections.abc import Callable, Iterable, Iterator
@@ -104,6 +105,58 @@ logger = logging.getLogger(__name__)
 
 FIRST_COMPLETED = "FIRST_COMPLETED"
 ALL_COMPLETED = "ALL_COMPLETED"
+
+
+class RemoteTraceback(Exception):
+    """Carries the traceback of an exception raised on a worker.
+
+    Set as the __cause__ of the exception that result() raises, so that
+    the worker's traceback is printed after the controller's.
+    """
+
+    def __init__(self, tb: str):
+        super().__init__(tb)
+        self.tb = tb
+
+    def __str__(self) -> str:
+        return f'\n"""\n{self.tb}"""'
+
+
+class RemoteTaskError(Exception):
+    """Raised for a task whose exception could not be sent back as itself,
+    because it could not be pickled on the worker or unpickled on the
+    controller.
+
+    exc_type is the qualified name of the original exception's class.
+    """
+
+    def __init__(self, exc_type: str, message: str, world_rank: int | None = None):
+        super().__init__(f"{exc_type}: {message}")
+        self.exc_type = exc_type
+        self.world_rank = world_rank
+
+
+def exception_from_failure(failure: dict[str, Any]) -> BaseException:
+    """Rebuild the exception described by distwq.mpi.task_failure().
+
+    Returns the original exception if it survives pickling, and a
+    RemoteTaskError otherwise.  Either way the worker's traceback is
+    attached as a RemoteTraceback in __cause__.
+    """
+    exc = None
+    if failure.get("pickled") is not None:
+        try:
+            exc = pickle.loads(failure["pickled"])
+        except Exception:  # noqa: BLE001 - fall back to a description
+            exc = None
+    if not isinstance(exc, BaseException):
+        exc = RemoteTaskError(
+            failure.get("type", "Exception"),
+            failure.get("message", ""),
+            failure.get("world_rank"),
+        )
+    exc.__cause__ = RemoteTraceback(failure.get("traceback", ""))
+    return exc
 
 
 def task_reference(func: Callable) -> tuple[str, str]:
@@ -244,8 +297,9 @@ class TaskController:
         self._controller = execution_context._controller
         # Futures still waiting for their result, by task id.
         self._pending: dict[int, DistributedFuture] = {}
-        # Results that arrived for a task id with no registered future.
-        self._orphans: dict[int, Any] = {}
+        # Results that arrived for a task id with no registered future,
+        # as (value, failed) pairs.
+        self._orphans: dict[int, tuple[Any, bool]] = {}
         self._completion_counter = 0
         # Seconds to sleep between non-blocking checks when a wait has a timeout.
         self.poll_interval = 0.01
@@ -336,9 +390,16 @@ class TaskController:
         """Register future so that _pump() can deliver its result."""
         task_id = future.task_id
         if task_id in self._orphans:
-            future._resolve(self._orphans.pop(task_id), self._next_completion_index())
+            value, failed = self._orphans.pop(task_id)
+            self._deliver(future, value, failed)
         else:
             self._pending[task_id] = future
+
+    def _deliver(self, future: DistributedFuture, value: Any, failed: bool) -> None:
+        if failed:
+            future._fail(exception_from_failure(value), self._next_completion_index())
+        else:
+            future._resolve(value, self._next_completion_index())
 
     def _next_completion_index(self) -> int:
         index = self._completion_counter
@@ -354,12 +415,15 @@ class TaskController:
         if not self._controller:
             return
         self._controller.process(block=block)
+        failed_tasks = getattr(self._controller, "failed_tasks", set())
         for task_id, value in self._controller.probe_all_next_results():
+            failed = task_id in failed_tasks
+            failed_tasks.discard(task_id)
             future = self._pending.pop(task_id, None)
             if future is None:
-                self._orphans[task_id] = value
+                self._orphans[task_id] = (value, failed)
             else:
-                future._resolve(value, self._next_completion_index())
+                self._deliver(future, value, failed)
 
     def _is_outstanding(self, task_id: int) -> bool:
         """True if the controller still has this task queued, running or finished."""
@@ -706,6 +770,9 @@ class DistributedEnvironment:
             spawn_executable=wc.spawn_executable,
             spawn_args=wc.spawn_args,
             verbose=getattr(self.config.logging, "verbose", False),
+            # A task's exception is raised from its future's result()
+            # instead of aborting the job.
+            capture_errors=True,
         )
         logger.info(f"Topology established: role={self._topology.role}")
 
