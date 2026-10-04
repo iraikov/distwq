@@ -7,22 +7,23 @@ Run with: mpirun -n 8 python test_worker_grouping.py
 
 import sys
 import time
+
 import numpy as np
 
 # Add current directory to path for imports
 sys.path.insert(0, ".")
 
 try:
+    from config import Config
     from future import (
-        DistributedWorkQueue,
         DistributedTaskExecution,
-        WorkerGroupConfig,
+        DistributedWorkQueue,
         GroupingMethod,
+        WorkerGroupConfig,
         create_spawn_queue,
         create_split_queue,
     )
-    from config import Config
-    from mpi import is_controller, rank, world_comm, has_mpi
+    from mpi import has_mpi, is_controller, rank, world_comm
 except ImportError as e:
     print(f"Import error: {e}")
     sys.exit(1)
@@ -113,7 +114,7 @@ def test_basic_worker_grouping():
                 if worker_info:
                     print(f"  Worker info: {worker_info}")
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"Error in basic worker grouping test: {e}")
         import traceback
 
@@ -147,13 +148,13 @@ def test_split_grouping():
                 print(f"Submitted simulation task {params['id']}")
 
             # Process results as they complete
-            from concurrent.futures import as_completed
+            from future import as_completed
 
             for future in as_completed(futures, timeout=30):
                 result = future.result()
                 print(f"Simulation result: {result}")
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"Error in split grouping test: {e}")
         import traceback
 
@@ -199,7 +200,7 @@ def test_mixed_workload():
                 task_type = "group" if future.is_group_task() else "regular"
                 print(f"{task_type} task {i} result: {result}")
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"Error in mixed workload test: {e}")
         import traceback
 
@@ -227,7 +228,7 @@ def test_map_with_groups():
                     f"  Task {i}: size {result['matrix_size']}, trace {result['trace']:.2f}"
                 )
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"Error in map with groups test: {e}")
         import traceback
 
@@ -247,7 +248,7 @@ def test_configuration_validation():
         )
         print("ERROR: Invalid configuration was accepted!")
         print(invalid_config)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"Invalid configuration correctly rejected: {e}")
 
     # Test valid configuration
@@ -259,7 +260,7 @@ def test_configuration_validation():
         )
         print("Valid configuration accepted")
         print(valid_config)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         print(f"ERROR: Valid configuration rejected: {e}")
 
 

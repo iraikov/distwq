@@ -1,55 +1,49 @@
 # Future-based distributed task management with Two-Phase Iterator design
 
-import time
-import threading
 import logging
-from concurrent.futures import Future, as_completed
+import threading
+import time
+from collections.abc import Callable, Iterable, Iterator
 from typing import (
-    Iterable,
-    Iterator,
-    TypeVar,
-    Generic,
-    Callable,
-    List,
-    Tuple,
-    Dict,
     Any,
+    Generic,
     Optional,
+    TypeVar,
 )
 
 # Import from mpi.py to access MPI functionality
 try:
     from .mpi import (
+        GroupingMethod,
         MPIController,
         MPIWorker,
-        GroupingMethod,
+        check_spawn_config,
+        check_split_config,
+        get_group_comm,
+        has_mpi,
         is_controller,
         is_worker,
         rank,
-        world_comm,
-        has_mpi,
-        worker_main,
         run_spawn_group,
         run_split_group,
-        get_group_comm,
-        check_spawn_config,
-        check_split_config,
+        worker_main,
+        world_comm,
     )
 except ImportError:
     # Try absolute import
     from mpi import (
+        GroupingMethod,
         MPIController,
         MPIWorker,
-        GroupingMethod,
+        get_group_comm,
+        has_mpi,
         is_controller,
         is_worker,
         rank,
-        world_comm,
-        has_mpi,
-        worker_main,
         run_spawn_group,
         run_split_group,
-        get_group_comm,
+        worker_main,
+        world_comm,
     )
 
 # Import config if available, otherwise provide basic fallback
@@ -110,8 +104,19 @@ R = TypeVar("R")
 logger = logging.getLogger(__name__)
 
 
-class DistributedFuture(Future, Generic[R]):
-    """Enhanced Future with distributed computing features and progress monitoring"""
+FIRST_COMPLETED = "FIRST_COMPLETED"
+ALL_COMPLETED = "ALL_COMPLETED"
+
+
+class DistributedFuture(Generic[R]):
+    """Result of a task submitted through a TaskController.
+
+    A future does not wait on a background thread.  Waiting for it, by
+    calling result(), exception(), done(), or the module-level
+    as_completed() and wait(), advances the controller on the calling
+    thread until the result arrives.  Done callbacks therefore run on that
+    same thread, in the order the results arrive.
+    """
 
     def __init__(
         self,
@@ -119,21 +124,72 @@ class DistributedFuture(Future, Generic[R]):
         context: "TaskController",
         worker_group_size: int = 1,
     ):
-        super().__init__()
         self.task_id = task_id
         self._context = context
         self._submitted_at = time.time()
         self.worker_group_size = worker_group_size
+        self._done = False
+        self._result: Any = None
+        self._exception: BaseException | None = None
+        self._callbacks: list[Callable[[DistributedFuture], Any]] = []
+        self._completion_index: int | None = None
 
-    def worker_info(self) -> Optional[Dict[str, Any]]:
+    def done(self) -> bool:
+        """Return True once the result is available, checking without blocking."""
+        if not self._done:
+            self._context._pump(block=False)
+        return self._done
+
+    def result(self, timeout: float | None = None) -> R:
+        """Return the task's result, waiting up to timeout seconds for it."""
+        self._context._wait(self, timeout)
+        if self._exception is not None:
+            raise self._exception
+        return self._result
+
+    def exception(self, timeout: float | None = None) -> BaseException | None:
+        """Return the exception raised by the task, or None if it succeeded."""
+        self._context._wait(self, timeout)
+        return self._exception
+
+    def add_done_callback(self, fn: Callable[["DistributedFuture"], Any]) -> None:
+        """Call fn(future) when the future completes, or now if it already has."""
+        if self._done:
+            fn(self)
+        else:
+            self._callbacks.append(fn)
+
+    def cancel(self) -> bool:
+        """Tasks cannot be withdrawn once submitted; always returns False."""
+        return False
+
+    def cancelled(self) -> bool:
+        return False
+
+    def _resolve(self, value: Any, completion_index: int) -> None:
+        self._result = value
+        self._finish(completion_index)
+
+    def _fail(self, exc: BaseException, completion_index: int) -> None:
+        self._exception = exc
+        self._finish(completion_index)
+
+    def _finish(self, completion_index: int) -> None:
+        self._done = True
+        self._completion_index = completion_index
+        callbacks, self._callbacks = self._callbacks, []
+        for fn in callbacks:
+            fn(self)
+
+    def worker_info(self) -> dict[str, Any] | None:
         """Get information about the worker or worker group processing this task"""
         return self._context._get_worker_info(self.task_id)
 
-    def estimated_completion(self) -> Optional[float]:
+    def estimated_completion(self) -> float | None:
         """Get estimated completion time in seconds"""
         return self._context._get_estimated_completion(self.task_id)
 
-    def progress(self) -> Optional[float]:
+    def progress(self) -> float | None:
         """Get task progress as a fraction between 0.0 and 1.0"""
         return self._context._get_task_progress(self.task_id)
 
@@ -153,16 +209,16 @@ class TaskController:
 
         self._env = execution_context
         self._controller = execution_context._controller
-        self._pending_futures = {}  # Map task_id to future for completion tracking
-        self._monitoring_thread = None
-        self._shutdown_requested = False
-
-        self.exit_timeout = 5.0
-        # Start monitoring thread for futures completion
-        self._start_monitoring_thread()
+        # Futures still waiting for their result, by task id.
+        self._pending: dict[int, DistributedFuture] = {}
+        # Results that arrived for a task id with no registered future.
+        self._orphans: dict[int, Any] = {}
+        self._completion_counter = 0
+        # Seconds to sleep between non-blocking checks when a wait has a timeout.
+        self.poll_interval = 0.01
 
     def submit(
-        self, func: Callable[..., R], *args, timeout: Optional[int] = None, **kwargs
+        self, func: Callable[..., R], *args, timeout: int | None = None, **kwargs
     ) -> DistributedFuture[R]:
         """Submit a single task for distributed execution"""
         if not self._controller:
@@ -192,8 +248,8 @@ class TaskController:
         self,
         func: Callable[[T], R],
         iterable: Iterable[T],
-        chunk_size: Optional[int] = None,
-        timeout: Optional[int] = None,
+        chunk_size: int | None = None,
+        timeout: int | None = None,
         use_worker_groups: bool = False,
     ) -> Iterator[R]:
         """Map function over iterable using distributed workers"""
@@ -208,7 +264,7 @@ class TaskController:
         self,
         func: Callable[[T], R],
         iterable: Iterable[T],
-        chunk_size: Optional[int] = None,
+        chunk_size: int | None = None,
     ) -> Iterator[R]:
         """Map function over iterable, yielding results as they complete"""
         tasks = [(func, (item,), {}) for item in iterable]
@@ -219,8 +275,8 @@ class TaskController:
             yield future.result()
 
     def batch_submit(
-        self, tasks: List[Tuple[Callable, tuple, dict]]
-    ) -> List[DistributedFuture]:
+        self, tasks: list[tuple[Callable, tuple, dict]]
+    ) -> list[DistributedFuture]:
         """Submit multiple tasks efficiently"""
         if not self._controller:
             raise RuntimeError("No controller available for task submission")
@@ -254,52 +310,81 @@ class TaskController:
         return 1
 
     def _setup_future_completion(self, future: DistributedFuture):
-        """Set up future to be completed when task finishes"""
-        self._pending_futures[future.task_id] = future
+        """Register future so that _pump() can deliver its result."""
+        task_id = future.task_id
+        if task_id in self._orphans:
+            future._resolve(self._orphans.pop(task_id), self._next_completion_index())
+        else:
+            self._pending[task_id] = future
 
-    def _start_monitoring_thread(self):
-        """Start background thread to monitor task completion"""
-        if self._monitoring_thread is None:
-            self._monitoring_thread = threading.Thread(target=self._monitor_completions)
-            self._monitoring_thread.daemon = True
-            self._monitoring_thread.start()
+    def _next_completion_index(self) -> int:
+        index = self._completion_counter
+        self._completion_counter += 1
+        return index
 
-    def _monitor_completions(self):
-        """Monitor task completions and update futures"""
-        while not self._shutdown_requested and self._controller:
-            try:
-                logger.debug("Checking for completed tasks...")
-                result = self._controller.probe_next_result()
-                logger.debug(f"Result: {result}")
+    def _pump(self, block: bool) -> None:
+        """Handle incoming worker messages and deliver any finished results.
 
-                if result is not None:
-                    task_id, task_result = result
+        With block=True, waits in a blocking MPI probe until at least one
+        message arrives; otherwise returns at once if nothing is pending.
+        """
+        if not self._controller:
+            return
+        self._controller.process(block=block)
+        for task_id, value in self._controller.probe_all_next_results():
+            future = self._pending.pop(task_id, None)
+            if future is None:
+                self._orphans[task_id] = value
+            else:
+                future._resolve(value, self._next_completion_index())
 
-                    # Complete the corresponding future
-                    if task_id in self._pending_futures:
-                        future = self._pending_futures[task_id]
-                        future.set_result(task_result)
-                        del self._pending_futures[task_id]
-                else:
-                    # No results ready, sleep briefly
-                    time.sleep(0.1)
+    def _is_outstanding(self, task_id: int) -> bool:
+        """True if the controller still has this task queued, running or finished."""
+        c = self._controller
+        return (
+            task_id in c.waiting
+            or task_id in c.assigned
+            or task_id in c.results
+            or task_id in c.result_queue
+        )
 
-            except Exception as e:
-                logger.error(f"Error in monitoring thread: {e}")
-                # Handle errors by setting exception on all pending futures
-                for future in self._pending_futures.values():
-                    if not future.done():
-                        future.set_exception(e)
-                self._pending_futures.clear()
-                break
+    def _wait(self, future: DistributedFuture, timeout: float | None = None) -> None:
+        """Advance the controller until future is done or timeout seconds pass."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not future._done:
+            if not self._is_outstanding(future.task_id):
+                raise RuntimeError(
+                    f"task {future.task_id} is not known to the controller "
+                    "and its result was never delivered"
+                )
+            if deadline is None:
+                self._pump(block=True)
+            else:
+                self._pump(block=False)
+                if future._done:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"task {future.task_id} did not finish within {timeout} s"
+                    )
+                time.sleep(self.poll_interval)
 
-    def _shutdown(self):
-        """Internal shutdown method"""
-        self._shutdown_requested = True
-        if self._monitoring_thread:
-            self._monitoring_thread.join(timeout=self.exit_timeout)
+    def _close(self) -> None:
+        """Wait for every pending future to receive its result.
 
-    def _get_worker_info(self, task_id: int) -> Optional[Dict[str, Any]]:
+        Called when the session ends, before the controller tells workers
+        to exit.  Calling it again does nothing once nothing is pending.
+        """
+        while self._pending:
+            for task_id in [t for t in self._pending if not self._is_outstanding(t)]:
+                self._pending.pop(task_id)._fail(
+                    RuntimeError(f"task {task_id} is not known to the controller"),
+                    self._next_completion_index(),
+                )
+            if self._pending:
+                self._pump(block=True)
+
+    def _get_worker_info(self, task_id: int) -> dict[str, Any] | None:
         """Get information about the worker or worker group processing this task"""
         if not self._controller:
             return None
@@ -344,7 +429,7 @@ class TaskController:
             return info
         return None
 
-    def _get_estimated_completion(self, task_id: int) -> Optional[float]:
+    def _get_estimated_completion(self, task_id: int) -> float | None:
         """Get estimated completion time in seconds"""
         worker_info = self._get_worker_info(task_id)
         if worker_info:
@@ -352,15 +437,88 @@ class TaskController:
             return worker_info.get("total_time", 0) + 1.0  # Add 1 second buffer
         return None
 
-    def _get_task_progress(self, task_id: int) -> Optional[float]:
+    def _get_task_progress(self, task_id: int) -> float | None:
         """Get task progress as a fraction between 0.0 and 1.0"""
         # Placeholder for progress tracking - would need enhancement
         # in the underlying MPI controller to support progress reporting
-        if task_id in self._pending_futures:
-            elapsed = time.time() - self._pending_futures[task_id]._submitted_at
+        if task_id in self._pending:
+            elapsed = time.time() - self._pending[task_id]._submitted_at
             # Simple heuristic: assume 50% progress after 5 seconds
             return min(elapsed / 10.0, 0.95)  # Cap at 95% until actually complete
         return None
+
+
+def _common_controller(futures: list[DistributedFuture]) -> TaskController | None:
+    controllers = {id(f._context): f._context for f in futures}
+    if len(controllers) > 1:
+        raise ValueError("all futures must come from the same TaskController")
+    return next(iter(controllers.values()), None)
+
+
+def as_completed(
+    futures: Iterable[DistributedFuture], timeout: float | None = None
+) -> Iterator[DistributedFuture]:
+    """Yield futures as they complete, in the order their results arrive.
+
+    Futures that are already done are yielded first.  While waiting, the
+    controller is advanced on the calling thread.  Raises TimeoutError if
+    timeout seconds pass before every future is done.
+    """
+    remaining = list(dict.fromkeys(futures))
+    controller = _common_controller(remaining)
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while remaining:
+        finished = sorted(
+            (f for f in remaining if f._done), key=lambda f: f._completion_index
+        )
+        for f in finished:
+            remaining.remove(f)
+            yield f
+        if not remaining:
+            break
+        for f in remaining:
+            if not controller._is_outstanding(f.task_id):
+                raise RuntimeError(
+                    f"task {f.task_id} is not known to the controller "
+                    "and its result was never delivered"
+                )
+        if deadline is None:
+            controller._pump(block=True)
+        else:
+            controller._pump(block=False)
+            if any(f._done for f in remaining):
+                continue
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"{len(remaining)} futures did not finish within {timeout} s"
+                )
+            time.sleep(controller.poll_interval)
+
+
+def wait(
+    futures: Iterable[DistributedFuture],
+    timeout: float | None = None,
+    return_when: str = ALL_COMPLETED,
+) -> tuple[set, set]:
+    """Wait for futures and return (done, not_done) sets.
+
+    return_when is FIRST_COMPLETED or ALL_COMPLETED.  Unlike as_completed(),
+    reaching the timeout is not an error: the futures still running are
+    returned in not_done.
+    """
+    if return_when not in (FIRST_COMPLETED, ALL_COMPLETED):
+        raise ValueError(f"unsupported return_when value {return_when!r}")
+    pending = set(futures)
+    done = set()
+    try:
+        for f in as_completed(pending, timeout=timeout):
+            done.add(f)
+            if return_when == FIRST_COMPLETED:
+                break
+    except TimeoutError:
+        pass
+    done |= {f for f in pending if f._done}
+    return done, pending - done
 
 
 class DistributedEnvironment:
@@ -368,13 +526,14 @@ class DistributedEnvironment:
 
     def __init__(
         self,
-        config: Optional[Config] = None,
-        worker_config: Optional[WorkerGroupConfig] = None,
+        config: Config | None = None,
+        worker_config: WorkerGroupConfig | None = None,
     ):
         self.config = config or Config()
         self.worker_config = worker_config
 
         self._controller = None
+        self._session: TaskController | None = None
         self._worker = None
         self._active = False
         self._group_comm = None
@@ -386,7 +545,7 @@ class DistributedEnvironment:
 
         self.exit_timeout = 2.0
 
-    def __enter__(self) -> "DistributedEnvironment":
+    def __enter__(self) -> "DistributedEnvironment":  # noqa: PYI034
         """Set up distributed environment - ALL ranks participate"""
         self._setup_environment()
         return self
@@ -400,7 +559,13 @@ class DistributedEnvironment:
         """Return iterator that yields TaskController only on controller rank"""
         if is_controller:
             # Only controller gets the controller task
-            yield TaskController(self)
+            session = TaskController(self)
+            self._session = session
+            try:
+                yield session
+            finally:
+                # Deliver results to futures the caller still holds.
+                session._close()
         else:
             return iter([])
 
@@ -634,6 +799,21 @@ class DistributedEnvironment:
         if self._worker:
             self._worker.serve()
 
+    def _await_all_workers_ready(self):
+        """Block until every worker has reported READY at least once.
+
+        MPIController.exit() sends EXIT only to workers it has heard from.
+        A session that submitted no work may end before any READY message
+        has been read, which would leave workers waiting forever, so read
+        them here first.
+        """
+        c = self._controller
+        if not c.workers_available:
+            return
+        n_workers = c.comm.size - 1
+        while len(c.active_workers) < n_workers:
+            c.process(block=True)
+
     def _cleanup_environment(self):
         """Clean up the distributed environment"""
         if not self._active:
@@ -641,11 +821,13 @@ class DistributedEnvironment:
 
         # Clean up controller
         if self._controller:
-            # Shutdown any active task controllers
-            if hasattr(self, "_active_controllers"):
-                for controller in getattr(self, "_active_controllers", []):
-                    controller._shutdown()
+            # Deliver results to any futures still pending before the
+            # controller drains and discards its queue in exit().
+            if self._session is not None:
+                self._session._close()
+                self._session = None
 
+            self._await_all_workers_ready()
             self._controller.exit()
             self._controller = None
 
@@ -662,7 +844,7 @@ class DistributedEnvironment:
 def create_spawn_environment(
     nprocs_per_worker: int = 2,
     broker_is_worker: bool = True,
-    config: Optional[Config] = None,
+    config: Config | None = None,
 ) -> DistributedEnvironment:
     """Create distributed environment with spawn-based worker grouping"""
     worker_config = WorkerGroupConfig(
@@ -676,7 +858,7 @@ def create_spawn_environment(
 def create_split_environment(
     nprocs_per_worker: int = 2,
     broker_is_worker: bool = True,
-    config: Optional[Config] = None,
+    config: Config | None = None,
 ) -> DistributedEnvironment:
     """Create distributed environment with split-based worker grouping"""
     worker_config = WorkerGroupConfig(
