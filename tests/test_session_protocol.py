@@ -30,7 +30,12 @@ try:
 except ImportError:
     pytest.skip("MPI not available", allow_module_level=True)
 
-from distwq.future import Config, DistributedEnvironment, WorkerGroupConfig
+from distwq.future import (
+    Config,
+    ControllerExitedError,
+    DistributedEnvironment,
+    WorkerGroupConfig,
+)
 from distwq.mpi import GroupingMethod
 
 pytestmark = pytest.mark.skipif(SIZE < 2, reason="Requires at least 2 MPI processes")
@@ -117,6 +122,41 @@ def test_exception_before_session():
         with DistributedEnvironment(Config()) as env:
             for _controller in env.controller_session():
                 pass
+
+
+def test_broadcast_reaches_every_rank():
+    with DistributedEnvironment(Config()) as env:
+        total = None
+        for controller in env.controller_session():
+            total = sum(controller.map(scale, range(4)))
+        total = env.broadcast(total)
+        assert total == 12
+        # A second broadcast in the same environment, with no session.
+        assert env.broadcast({"rank0": True} if IS_CONTROLLER else None) == {
+            "rank0": True
+        }
+
+
+def test_controller_error_before_broadcast_releases_workers():
+    # The workers wait in broadcast() while the controller, which raised,
+    # leaves the environment; they must be released, not left waiting.
+    if IS_CONTROLLER:
+        with (
+            pytest.raises(ValueError, match="before broadcast"),
+            DistributedEnvironment(Config()) as env,
+        ):
+            for controller in env.controller_session():
+                controller.submit(add, 1, 2).result()
+                raise ValueError("before broadcast")
+            env.broadcast("never sent")
+    else:
+        with (
+            pytest.raises(ControllerExitedError),
+            DistributedEnvironment(Config()) as env,
+        ):
+            for _controller in env.controller_session():
+                pass
+            env.broadcast()
 
 
 def test_environments_back_to_back():

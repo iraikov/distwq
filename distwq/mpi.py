@@ -62,6 +62,7 @@ class MessageTag(IntEnum):
     TASK = 2
     EXIT = 3
     SESSION_END = 4
+    BROADCAST = 5
 
 
 class GroupingMethod(IntEnum):
@@ -779,6 +780,10 @@ class MPIController:
         :return object: id of call, to be used in get_result().
 
         """
+        if args is None:
+            args = []
+        if kwargs is None:
+            kwargs = []
         if len(kwargs) > 0:
             assert (len(args) == 0) or (len(args) == len(kwargs))
         submitted_task_ids = []
@@ -892,6 +897,13 @@ class MPIController:
         if task_id in self.results:
             if task_id in self.result_queue:
                 self.result_queue.remove(task_id)
+            return task_id, self.results.pop(task_id)
+        # A call still waiting for a free worker is dispatched by process()
+        # once a worker reports READY.
+        while task_id in self.waiting:
+            self.process(block=True)
+        if task_id in self.results:
+            self.result_queue.remove(task_id)
             return task_id, self.results.pop(task_id)
         source = self.assigned[task_id]
         if self.workers_available:
@@ -1082,21 +1094,19 @@ class MPIController:
 
     def exit(self) -> None:
         """
-        Tell all workers to exit.
+        Collect any results not yet collected, then tell all workers to exit.
+
+        Every worker is told, including one the controller has not heard
+        from yet because it was never given a call: shutdown() first waits
+        for each worker to report READY.  Uncollected results are
+        discarded.
 
         Can only be called by the controller.
         """
         if self.workers_available:
             while self.get_next_result() is not None:
                 pass
-            # tell workers to exit:
-            reqs = []
-            for worker in self.active_workers:
-                logger.info(f"MPI controller : telling worker {worker} to exit...")
-                reqs.append(
-                    self.comm.isend(None, dest=worker, tag=MessageTag.EXIT.value)
-                )
-            MPI.Request.Waitall(reqs)
+            self.shutdown()
 
     def wait_all_ready(self) -> None:
         """
@@ -1122,17 +1132,31 @@ class MPIController:
         while len(self.ready_workers) < n_workers:
             self.process(block=True)
 
-    def _send_to_all_workers(self, tag: MessageTag) -> None:
-        """Send an empty message with tag to every worker, then forget
-        that they were ready: each will report READY again when it next
-        enters serve()."""
+    def _send_to_all_workers(self, tag: MessageTag, payload: Any = None) -> None:
+        """Send payload with tag to every worker, then forget that they
+        were ready: each will report READY again when it next enters
+        serve()."""
         reqs = [
-            self.comm.isend(None, dest=worker, tag=tag.value)
+            self.comm.isend(payload, dest=worker, tag=tag.value)
             for worker in range(1, self.comm.size)
         ]
         MPI.Request.Waitall(reqs)
         self.ready_workers = []
         self.ready_workers_data = {}
+
+    def broadcast_to_workers(self, value: Any) -> None:
+        """
+        Wait until every worker is idle in serve(), then send value to all
+        of them.
+
+        Each worker's serve() returns MessageTag.BROADCAST and leaves the
+        value in its broadcast_value attribute; brokers pass it on to their
+        collective workers.  Can only be called by the controller.
+        """
+        if not self.workers_available:
+            return
+        self.wait_all_ready()
+        self._send_to_all_workers(MessageTag.BROADCAST, value)
 
     def end_session(self) -> None:
         """
@@ -1257,6 +1281,9 @@ class MPIWorker:
             elif tag == MessageTag.SESSION_END.value:
                 logger.info(f"MPI worker {self.worker_id}: session ended.")
                 return MessageTag.SESSION_END
+            elif tag == MessageTag.BROADCAST.value:
+                self.broadcast_value = data
+                return MessageTag.BROADCAST
             elif tag == MessageTag.TASK.value:
                 (name_to_call, args, kwargs, module, time_est, task_id) = data
             else:
@@ -1435,6 +1462,9 @@ class MPICollectiveWorker:
                     f"MPI collective worker {self.worker_id}-{rank}: session ended."
                 )
                 return MessageTag.SESSION_END
+            if name_to_call == "broadcast":
+                self.broadcast_value = args[0]
+                return MessageTag.BROADCAST
             if name_to_call == "exit":
                 logger.info(
                     f"MPI collective worker {self.worker_id}-{rank}: exiting..."
@@ -1613,6 +1643,10 @@ class MPICollectiveBroker:
                 logger.info(f"MPI collective broker {self.worker_id}: session ended.")
                 self.scatter_task("session_end", (), {}, "", 0, 0)
                 return MessageTag.SESSION_END
+            elif tag == MessageTag.BROADCAST.value:
+                self.broadcast_value = data
+                self.scatter_task("broadcast", (data,), {}, "", 0, 0)
+                return MessageTag.BROADCAST
             elif tag == MessageTag.TASK.value:
                 (name_to_call, args, kwargs, module, time_est, task_id) = data
             else:

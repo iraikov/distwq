@@ -122,6 +122,12 @@ class RemoteTraceback(Exception):
         return f'\n"""\n{self.tb}"""'
 
 
+class ControllerExitedError(RuntimeError):
+    """Raised on a worker rank waiting in DistributedEnvironment.broadcast()
+    when the controller leaves the environment without broadcasting,
+    usually because an exception was raised on the controller."""
+
+
 class RemoteTaskError(Exception):
     """Raised for a task whose exception could not be sent back as itself,
     because it could not be pickled on the worker or unpickled on the
@@ -712,14 +718,39 @@ class DistributedEnvironment:
 
         Call it inside the environment but outside any session, for
         example right after the session loop, so that every rank reaches
-        it.  The value given on worker ranks is ignored.
+        it.  The value given on worker ranks is ignored.  Every process of
+        a worker group receives the value.
+
+        If the controller leaves the environment without calling
+        broadcast(), for example because an exception escaped from its
+        session, the worker ranks raise ControllerExitedError instead of
+        waiting forever.
         """
         if not self._active:
             raise RuntimeError("broadcast() must be called inside the environment")
-        if not has_mpi or world_comm.size < 2:
+        if self.role == "controller":
+            if self._session is not None:
+                raise RuntimeError("broadcast() cannot be called inside a session")
+            self._controller.broadcast_to_workers(value)
             return value
-        payload = value if self.role == "controller" else None
-        return world_comm.bcast(payload, root=controller_rank)
+        if self._server is None:
+            # An idle rank, which no message can reach.
+            return None
+        # The value arrives through serve(), like the end of a session.  If
+        # the controller leaves the environment instead, for example after
+        # an error, EXIT arrives here and this rank is released.
+        tag = self._serve()
+        if tag == MessageTag.BROADCAST:
+            return self._server.broadcast_value
+        if tag == MessageTag.SESSION_END:
+            raise RuntimeError(
+                "worker received SESSION_END in broadcast(): the controller "
+                "ran a session that this rank did not"
+            )
+        raise ControllerExitedError(
+            "the controller left the environment instead of calling "
+            "broadcast(); see the controller's error"
+        )
 
     def is_active(self) -> bool:
         """Check if the distributed environment is active"""

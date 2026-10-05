@@ -1,291 +1,152 @@
-#!/usr/bin/env python3
 """
-Test script for worker grouping functionality in the futures interface.
+MPI tests for worker groups in DistributedEnvironment.
 
-Run with: mpirun -n 8 python test_worker_grouping.py
+Run on several ranks; each layout runs only at world sizes it fits, so
+use a few sizes to cover them all, for example:
+
+    mpirun.openmpi -n 3 python -m pytest tests/test_worker_grouping.py
+    mpirun.openmpi -n 4 python -m pytest tests/test_worker_grouping.py
+    mpirun.openmpi -n 5 python -m pytest tests/test_worker_grouping.py
+
+A worker group is nprocs_per_worker processes that each run every task
+sent to the group, plus one broker process that relays tasks from the
+controller.  With broker_is_worker=True the broker is one of those
+processes; otherwise it is an extra process that only relays.  A group
+task's result is the list of results from the processes that ran it.
+
+Spawned groups are tested only when DISTWQ_TEST_SPAWN=1, since spawning
+does not work with every MPI installation.
 """
 
-import sys
-import time
+import os
 
-import numpy as np
-
-# Add current directory to path for imports
-sys.path.insert(0, ".")
+import pytest
 
 try:
-    from config import Config
-    from future import (
-        DistributedTaskExecution,
-        DistributedWorkQueue,
-        GroupingMethod,
-        WorkerGroupConfig,
-        create_spawn_queue,
-        create_split_queue,
-    )
-    from mpi import has_mpi, is_controller, rank, world_comm
-except ImportError as e:
-    print(f"Import error: {e}")
-    sys.exit(1)
+    from mpi4py import MPI
+
+    RANK = MPI.COMM_WORLD.Get_rank()
+    SIZE = MPI.COMM_WORLD.Get_size()
+except ImportError:
+    pytest.skip("MPI not available", allow_module_level=True)
+
+from distwq.functional import map_distributed
+from distwq.future import (
+    Config,
+    DistributedEnvironment,
+    WorkerGroupConfig,
+    create_split_environment,
+)
+from distwq.mpi import GroupingMethod
+
+pytestmark = pytest.mark.skipif(SIZE < 3, reason="Requires at least 3 MPI processes")
+
+IS_CONTROLLER = RANK == 0
 
 
-def simple_task(x: int) -> int:
-    """Simple task for testing regular workers"""
-    time.sleep(0.1)  # Simulate some work
+def square(x):
     return x * x
 
 
-def collective_matrix_multiply(matrix_size: int) -> dict:
-    """
-    Simulated collective matrix multiplication task.
-    """
-    # Simulate work that benefits from multiple processes
-    matrix_a = np.random.rand(matrix_size, matrix_size)
-    matrix_b = np.random.rand(matrix_size, matrix_size)
-
-    # Simulate collective computation
-    time.sleep(0.2)  # Simulate work
-    result = np.dot(matrix_a, matrix_b)
-
-    return {
-        "matrix_size": matrix_size,
-        "result_shape": result.shape,
-        "trace": np.trace(result),
-        "max_value": np.max(result),
-        "worker_group": True,
-    }
+def processes_per_group(nprocs_per_worker, broker_is_worker):
+    return nprocs_per_worker if broker_is_worker else nprocs_per_worker + 1
 
 
-def parallel_simulation(params: dict) -> dict:
-    """
-    Simulated parallel simulation that benefits from worker groups.
-    """
-    simulation_id = params["id"]
-    complexity = params.get("complexity", 1)
-
-    # Simulate parallel computation
-    time.sleep(0.1 * complexity)
-
-    return {
-        "simulation_id": simulation_id,
-        "complexity": complexity,
-        "result": simulation_id * complexity + np.random.randint(0, 100),
-        "processed_by_group": True,
-    }
+def fits(nprocs_per_worker, broker_is_worker):
+    return (SIZE - 1) % processes_per_group(nprocs_per_worker, broker_is_worker) == 0
 
 
-def test_basic_worker_grouping():
-    """Test basic worker grouping functionality"""
-    print("=== Testing Basic Worker Grouping ===")
+def run_two_sessions(worker_config):
+    """Run a submit and a map in two sessions; return what the controller saw."""
+    seen = {}
+    with DistributedEnvironment(Config(), worker_config) as env:
+        for ctl in env.controller_session():
+            seen["worker_count"] = env.worker_count
+            seen["submit"] = ctl.submit(square, 3).result()
+        for ctl in env.controller_session():
+            seen["map"] = map_distributed(ctl, square, range(4))
+    return seen
 
-    if not has_mpi or world_comm.size < 4:
-        print("Skipping: Need at least 4 MPI processes for worker grouping test")
-        return
 
-    # Configure worker groups
+# (nprocs_per_worker, broker_is_worker, collective_mode)
+LAYOUTS = [
+    (1, False, "gather"),
+    (1, True, "gather"),
+    (2, True, "gather"),
+    (2, False, "gather"),
+    (2, True, "sendrecv"),
+    (3, True, "gather"),
+]
+
+
+@pytest.mark.parametrize(("nprocs", "broker_is_worker", "collective_mode"), LAYOUTS)
+def test_split_layout(nprocs, broker_is_worker, collective_mode):
+    if not fits(nprocs, broker_is_worker):
+        pytest.skip(f"world size {SIZE} does not fit this layout")
+    worker_config = WorkerGroupConfig(
+        grouping_method=GroupingMethod.GroupSplit,
+        nprocs_per_worker=nprocs,
+        broker_is_worker=broker_is_worker,
+        collective_mode=collective_mode,
+    )
+    seen = run_two_sessions(worker_config)
+    if IS_CONTROLLER:
+        n_groups = (SIZE - 1) // processes_per_group(nprocs, broker_is_worker)
+        assert seen["worker_count"] == n_groups
+        assert seen["submit"] == [9] * nprocs
+        assert seen["map"] == [[x * x] * nprocs for x in range(4)]
+
+
+def test_no_grouping_with_several_processes_means_split():
+    # NoGrouping with nprocs_per_worker > 1 is treated as split grouping.
+    if not fits(2, True):
+        pytest.skip(f"world size {SIZE} does not fit groups of 2")
+    worker_config = WorkerGroupConfig(nprocs_per_worker=2, broker_is_worker=True)
+    seen = run_two_sessions(worker_config)
+    if IS_CONTROLLER:
+        assert seen["submit"] == [9, 9]
+
+
+def test_create_split_environment():
+    if not fits(2, True):
+        pytest.skip(f"world size {SIZE} does not fit groups of 2")
+    results = None
+    with create_split_environment(nprocs_per_worker=2, broker_is_worker=True) as env:
+        for ctl in env.controller_session():
+            results = map_distributed(ctl, square, [1, 2])
+        assert env.total_cores == env.worker_count * 2
+    if IS_CONTROLLER:
+        assert results == [[1, 1], [4, 4]]
+
+
+def test_broadcast_reaches_every_group_member():
+    if not fits(2, True):
+        pytest.skip(f"world size {SIZE} does not fit groups of 2")
+    worker_config = WorkerGroupConfig(
+        grouping_method=GroupingMethod.GroupSplit,
+        nprocs_per_worker=2,
+        broker_is_worker=True,
+    )
+    with DistributedEnvironment(Config(), worker_config) as env:
+        results = None
+        for ctl in env.controller_session():
+            results = map_distributed(ctl, square, [2, 3])
+        # Brokers and the other group members alike receive the value.
+        assert env.broadcast(results) == [[4, 4], [9, 9]]
+
+
+@pytest.mark.skipif(
+    os.environ.get("DISTWQ_TEST_SPAWN") != "1",
+    reason="set DISTWQ_TEST_SPAWN=1 to test spawned worker groups",
+)
+@pytest.mark.parametrize("nprocs", [2, 3])
+def test_spawn_layout(nprocs):
     worker_config = WorkerGroupConfig(
         grouping_method=GroupingMethod.GroupSpawn,
-        nprocs_per_worker=2,
-        broker_is_worker=True,
-        collective_mode="gather",
-    )
-
-    config = Config()
-    config.verbose = True
-
-    try:
-        with DistributedWorkQueue(config, worker_config) as queue:
-            print("Successfully created work queue with worker grouping")
-
-            # Submit a few group tasks
-            futures = []
-            for i in range(3):
-                matrix_size = 10 + i * 5
-                future = queue.submit_to_group(collective_matrix_multiply, matrix_size)
-                futures.append(future)
-                print(f"Submitted matrix multiplication task {i} (size: {matrix_size})")
-
-            # Collect results
-            for i, future in enumerate(futures):
-                result = future.result(timeout=30)
-                print(f"Task {i} result: {result}")
-                print(f"  Is group task: {future.is_group_task()}")
-                worker_info = future.worker_info()
-                if worker_info:
-                    print(f"  Worker info: {worker_info}")
-
-    except Exception as e:  # noqa: BLE001
-        print(f"Error in basic worker grouping test: {e}")
-        import traceback
-
-        traceback.print_exc()
-
-
-def test_split_grouping():
-    """Test split-based worker grouping"""
-    print("\n=== Testing Split-based Worker Grouping ===")
-
-    if not has_mpi or world_comm.size < 6:
-        print("Skipping: Need at least 6 MPI processes for split grouping test")
-        return
-
-    try:
-        # Use convenience function
-        with create_split_queue(nprocs_per_worker=2, broker_is_worker=True) as queue:
-            print("Successfully created split-based work queue")
-
-            # Submit simulation tasks
-            param_sets = [
-                {"id": 1, "complexity": 1},
-                {"id": 2, "complexity": 2},
-                {"id": 3, "complexity": 1},
-            ]
-
-            futures = []
-            for params in param_sets:
-                future = queue.submit_to_group(parallel_simulation, params)
-                futures.append(future)
-                print(f"Submitted simulation task {params['id']}")
-
-            # Process results as they complete
-            from future import as_completed
-
-            for future in as_completed(futures, timeout=30):
-                result = future.result()
-                print(f"Simulation result: {result}")
-
-    except Exception as e:  # noqa: BLE001
-        print(f"Error in split grouping test: {e}")
-        import traceback
-
-        traceback.print_exc()
-
-
-def test_mixed_workload():
-    """Test mixed regular and grouped tasks"""
-    print("\n=== Testing Mixed Workload ===")
-
-    worker_config = WorkerGroupConfig(
-        grouping_method=GroupingMethod.GroupSpawn
-        if has_mpi and world_comm.size >= 4
-        else GroupingMethod.NoGrouping,
-        nprocs_per_worker=2,
+        nprocs_per_worker=nprocs,
         broker_is_worker=True,
     )
-
-    config = Config()
-    config.verbose = True
-
-    try:
-        with DistributedTaskExecution(config, worker_config) as executor:
-            print("Testing mixed workload...")
-
-            # Submit regular tasks
-            regular_futures = []
-            for i in range(3):
-                future = executor.submit(simple_task, i + 1)
-                regular_futures.append(future)
-
-            # Submit grouped tasks if available
-            group_futures = []
-            if worker_config.grouping_method != GroupingMethod.NoGrouping:
-                for i in range(2):
-                    future = executor.submit(collective_matrix_multiply, 8 + i * 2)
-                    group_futures.append(future)
-
-            # Process all results
-            all_futures = regular_futures + group_futures
-            for i, future in enumerate(all_futures):
-                result = future.result(timeout=30)
-                task_type = "group" if future.is_group_task() else "regular"
-                print(f"{task_type} task {i} result: {result}")
-
-    except Exception as e:  # noqa: BLE001
-        print(f"Error in mixed workload test: {e}")
-        import traceback
-
-        traceback.print_exc()
-
-
-def test_map_with_groups():
-    """Test map operations with worker groups"""
-    print("\n=== Testing Map with Worker Groups ===")
-
-    if not has_mpi or world_comm.size < 4:
-        print("Skipping: Need at least 4 MPI processes for map with groups test")
-        return
-
-    try:
-        with create_spawn_queue(nprocs_per_worker=2) as queue:
-            print("Testing map with worker groups...")
-
-            # Test map with worker groups
-            matrix_sizes = [5, 6, 7, 8]
-            group_results = list(queue.map(collective_matrix_multiply, matrix_sizes))
-            print(f"Group map completed {len(group_results)} tasks")
-            for i, result in enumerate(group_results):
-                print(
-                    f"  Task {i}: size {result['matrix_size']}, trace {result['trace']:.2f}"
-                )
-
-    except Exception as e:  # noqa: BLE001
-        print(f"Error in map with groups test: {e}")
-        import traceback
-
-        traceback.print_exc()
-
-
-def test_configuration_validation():
-    """Test configuration validation"""
-    print("\n=== Testing Configuration Validation ===")
-
-    # Test invalid configuration
-    try:
-        invalid_config = WorkerGroupConfig(
-            grouping_method=GroupingMethod.GroupSpawn,
-            nprocs_per_worker=1,
-            broker_is_worker=True,
-        )
-        print("ERROR: Invalid configuration was accepted!")
-        print(invalid_config)
-    except Exception as e:  # noqa: BLE001
-        print(f"Invalid configuration correctly rejected: {e}")
-
-    # Test valid configuration
-    try:
-        valid_config = WorkerGroupConfig(
-            grouping_method=GroupingMethod.GroupSpawn,
-            nprocs_per_worker=2,
-            broker_is_worker=True,
-        )
-        print("Valid configuration accepted")
-        print(valid_config)
-    except Exception as e:  # noqa: BLE001
-        print(f"ERROR: Valid configuration rejected: {e}")
-
-
-def main():
-    """Main test function - only runs on controller"""
-
-    if not is_controller:
-        # Workers will be managed by the futures interface
-        return
-
-    print("Running worker grouping tests...")
-    print(f"MPI available: {has_mpi}")
-    if has_mpi:
-        print(f"World size: {world_comm.size}, Rank: {rank}")
-    print()
-
-    # Run tests
-    test_configuration_validation()
-    test_basic_worker_grouping()
-    test_split_grouping()
-    test_mixed_workload()
-    test_map_with_groups()
-
-    print("\n=== All tests completed ===")
-
-
-if __name__ == "__main__":
-    main()
+    seen = run_two_sessions(worker_config)
+    if IS_CONTROLLER:
+        assert seen["worker_count"] == SIZE - 1
+        assert seen["submit"] == [9] * nprocs
