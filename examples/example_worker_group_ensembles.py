@@ -7,7 +7,8 @@ plus the controller, for example with GROUP_SIZE = 2:
     mpirun -n 5 python examples/example_worker_group_ensembles.py
 
 Under split grouping every task sent to a group runs on each process of
-the group, and the task's result is the list of the processes' results.
+the group, and the task's result is a CollectiveTaskResult, whose values
+are the processes' results.
 Here each process uses that to run one independent replicate of a
 stochastic model: the leaky integrate-and-fire neuron below is driven by
 an Ornstein-Uhlenbeck noise current, seeded from the task's seed and the
@@ -111,7 +112,7 @@ def main():
                     "n": len(rates),
                     "noiseless": deterministic_rate(task["drive"]),
                 }
-                for task, rates in zip(tasks, replicates)
+                for task, rates in zip(tasks, (r.values for r in replicates))
             ]
             logger.info(
                 f"{env.worker_count} worker groups of {GROUP_SIZE} processes "

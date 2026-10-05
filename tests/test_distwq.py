@@ -22,7 +22,8 @@ def main(controller):
     s = []
     for i in range(n):
         _, res = controller.get_next_result()
-        s.append(res)
+        assert isinstance(res, distwq.TaskResult)
+        s.append(res.value)
     print(f"s = {s} ans = {ans}")
     assert np.sum(s) == ans
     controller.info()
@@ -54,7 +55,7 @@ def main_big(controller):
     x = 7
     controller.submit_call("do_big_work", (x,), module_name="test_distwq")
     _, res = controller.get_next_result()
-    assert res == bytes((x + i) % 256 for i in range(_BIG_PAYLOAD_LEN))
+    assert res.value == bytes((x + i) % 256 for i in range(_BIG_PAYLOAD_LEN))
     controller.info()
 
 

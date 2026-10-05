@@ -48,7 +48,7 @@ from typing import Any
 
 import numpy as np
 from mpi4py.MPI import Intercomm, Intracomm
-from numpy import float64, ndarray
+from numpy import float64
 
 
 class CollectiveMode(IntEnum):
@@ -270,12 +270,80 @@ def call_task(
         return task_failure(exc), True
 
 
+@dataclass(frozen=True)
+class TaskResult:
+    """Result of a task run by one process.
+
+    Sent by an MPIWorker, or stored by the controller when it runs a task
+    itself because no workers are available.  value is the task's return
+    value.
+    """
+
+    value: Any
+
+
+@dataclass(frozen=True)
+class CollectiveTaskResult:
+    """Results of a task run by every process of a worker group.
+
+    Sent by an MPICollectiveBroker.  values[i] is the return value on the
+    i-th process of the group that ran the task, in the order of the
+    group's merged communicator; when the broker also works, its own value
+    comes first.  A group has nprocs_per_worker processes that run tasks,
+    so len(values) == nprocs_per_worker whether or not the broker is one
+    of them.
+    """
+
+    values: list[Any]
+
+
+def _split_group_data(
+    sub_data: list[tuple[Any, dict[str, Any] | None]],
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    """Separate the (result, stat) pairs gathered from a worker group.
+
+    A process that ran the task always sends its stat, even when the task
+    returned None.  Only a broker that does not work sends (None, None),
+    so pairs are kept or dropped by their stat, which keeps results[i] and
+    stats[i] from the same process.
+    """
+    kept = [(result, stat) for result, stat in sub_data if stat is not None]
+    return [result for result, _ in kept], [stat for _, stat in kept]
+
+
+def _group_outcome(
+    results: list[Any], stats: list[dict[str, Any]]
+) -> tuple[Any, dict[str, Any] | None]:
+    """Return what a broker sends to the controller for one task.
+
+    The payload is a CollectiveTaskResult of every process's value or, if
+    the task failed on any process, the task_failure() description from
+    the first process whose stat reports an error.  The stat sent with it
+    is the one of the slowest process, marked as an error on failure.
+    """
+    stat = max(stats, key=lambda s: s["this_time"]) if stats else None
+    for result, this_stat in zip(results, stats):
+        if this_stat.get("error"):
+            return result, dict(stat, error=True)
+    return CollectiveTaskResult(list(results)), stat
+
+
 class MPIController:
-    def __init__(self, comm: Intracomm, time_limit: Any = None) -> None:
-        size = comm.size
+    def __init__(
+        self,
+        comm: Intracomm | None = None,
+        time_limit: Any = None,
+        capture_errors: bool = False,
+    ) -> None:
+        # Without a communicator there are no workers, and every call is
+        # run on this process.
+        size = comm.size if comm is not None else 1
 
         self.comm = comm
         self.workers_available = size > 1
+        # Report the exception of a call run on this process as a failed
+        # result instead of raising it from submit_call() and the like.
+        self.capture_errors = capture_errors
 
         self.count = 0
 
@@ -338,7 +406,8 @@ class MPIController:
         """
         (set) ids of finished calls whose result is a task_failure()
         description rather than a return value; only workers created with
-        capture_errors=True report failures.
+        capture_errors=True, or this controller when created with
+        capture_errors=True and running calls itself, report failures.
         """
         """
         (dictionary)
@@ -421,6 +490,48 @@ class MPIController:
             )
 
         return self.submit_waiting()
+
+    def _call_locally(
+        self,
+        name_to_call: str,
+        args: list[Any] | tuple[Any],
+        kwargs: dict[Any, Any],
+        module_name: str,
+        time_est: int,
+        task_id: int,
+    ) -> None:
+        """Run a call on this process and store its result under task_id.
+
+        Used when no workers are available.  The result is stored as a
+        TaskResult, as a worker would send it.  With capture_errors=True a
+        failed call is stored as its task_failure() description and its id
+        is added to failed_tasks; otherwise the exception propagates and
+        nothing is stored.
+        """
+        worker = 0
+        logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} ...")
+        call_time = time.time()
+        result, failed = call_task(
+            name_to_call, module_name, args, kwargs, self.capture_errors
+        )
+        this_time = time.time() - call_time
+        self.results[task_id] = result if failed else TaskResult(result)
+        if failed:
+            self.failed_tasks.add(task_id)
+        self.result_queue.append(task_id)
+        self.n_processed[worker] += 1
+        self.total_time[worker] = time.time() - start_time
+        self.stats.append(
+            {
+                "id": task_id,
+                "rank": worker,
+                "this_time": this_time,
+                "time_over_est": this_time / time_est,
+                "n_processed": self.n_processed[worker],
+                "total_time": self.total_time[worker],
+                "error": failed,
+            }
+        )
 
     def submit_call(
         self,
@@ -554,30 +665,8 @@ class MPIController:
         else:
             # perform call on this rank if no workers are available:
             worker = 0
-            logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} ...")
-            object_to_call = None
-            try:
-                if module_name not in sys.modules:
-                    importlib.import_module(module_name)
-                object_to_call = eval(name_to_call, sys.modules[module_name].__dict__)
-            except NameError:
-                logger.error(str(sys.modules[module_name].__dict__.keys()))
-                raise
-            call_time = time.time()
-            self.results[task_id] = object_to_call(*args, **kwargs)
-            self.result_queue.append(task_id)
-            this_time = time.time() - call_time
-            self.n_processed[0] += 1
-            self.total_time[0] = time.time() - start_time
-            self.stats.append(
-                {
-                    "id": task_id,
-                    "rank": worker,
-                    "this_time": this_time,
-                    "time_over_est": this_time / time_est,
-                    "n_processed": self.n_processed[0],
-                    "total_time": self.total_time[0],
-                }
+            self._call_locally(
+                name_to_call, args, kwargs, module_name, time_est, task_id
             )
 
         self.total_time_est[worker] += time_est
@@ -648,31 +737,8 @@ class MPIController:
             )
         else:
             # perform call on this rank if no workers are available:
-            worker = 0
-            logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} ...")
-            object_to_call = None
-            try:
-                if module_name not in sys.modules:
-                    importlib.import_module(module_name)
-                object_to_call = eval(name_to_call, sys.modules[module_name].__dict__)
-            except NameError:
-                logger.error(str(sys.modules[module_name].__dict__.keys()))
-                raise
-            call_time = time.time()
-            self.results[task_id] = object_to_call(*args, **kwargs)
-            self.result_queue.append(task_id)
-            this_time = time.time() - call_time
-            self.n_processed[0] += 1
-            self.total_time[0] = time.time() - start_time
-            self.stats.append(
-                {
-                    "id": task_id,
-                    "rank": worker,
-                    "this_time": this_time,
-                    "time_over_est": this_time / time_est,
-                    "n_processed": self.n_processed[0],
-                    "total_time": self.total_time[0],
-                }
+            self._call_locally(
+                name_to_call, args, kwargs, module_name, time_est, task_id
             )
 
         return task_id
@@ -808,47 +874,26 @@ class MPIController:
                 )
                 submitted_task_ids.append(this_task_id)
         else:
-            # perform call on this rank if no workers are available:
+            # perform calls on this rank if no workers are available; the
+            # requested workers do not exist and are ignored.
             worker = 0
-            logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} ...")
-            object_to_call = None
-            try:
-                if module_name not in sys.modules:
-                    importlib.import_module(module_name)
-                object_to_call = eval(name_to_call, sys.modules[module_name].__dict__)
-            except NameError:
-                logger.error(
-                    f"MPI controller : Unable to import {name_to_call}; "
-                    f"module environment is {sys.modules[module_name].__dict__.keys()}"
-                )
-                raise
             args, kwargs, task_ids, workers = multiple_task_arguments(
                 N, args, kwargs, task_ids, workers
             )
-            for this_args, this_kwargs, this_task_id, this_worker in zip(
-                args, kwargs, task_ids, workers
-            ):
+            for this_args, this_kwargs, this_task_id in zip(args, kwargs, task_ids):
                 if this_task_id is None:
                     this_task_id = self.count
                     self.count += 1
                 self.check_valid_task_id(this_task_id)
-                call_time = time.time()
-                self.results[this_task_id] = object_to_call(*this_args, **this_kwargs)
-                self.result_queue.append(this_task_id)
-                this_time = time.time() - call_time
-                self.n_processed[0] += 1
-                self.total_time[0] = time.time() - start_time
-                self.stats.append(
-                    {
-                        "id": this_task_id,
-                        "rank": worker,
-                        "this_time": this_time,
-                        "time_over_est": this_time / time_est,
-                        "n_processed": self.n_processed[0],
-                        "total_time": self.total_time[0],
-                    }
+                self._call_locally(
+                    name_to_call,
+                    this_args,
+                    this_kwargs,
+                    module_name,
+                    time_est,
+                    this_task_id,
                 )
-                self.total_time_est[this_worker] += time_est
+                self.total_time_est[worker] += time_est
                 submitted_task_ids.append(this_task_id)
 
         return submitted_task_ids
@@ -871,11 +916,7 @@ class MPIController:
         else:
             return None, None
 
-    def get_result(
-        self, task_id: int
-    ) -> (
-        tuple[int, tuple[ndarray, ndarray]] | tuple[int, list[tuple[ndarray, ndarray]]]
-    ):
+    def get_result(self, task_id: int) -> tuple[int, Any]:
         """
         Return result of earlier submitted call.
 
@@ -892,7 +933,10 @@ class MPIController:
                   by submit_call().
 
         :rtype:  object
-        :return: return value of call.
+        :return: id and result of call.  The result is a TaskResult from a
+                 single worker or from this process, a CollectiveTaskResult
+                 from a worker group, or, if the id is in failed_tasks, the
+                 task_failure() description of the call's exception.
         """
         if task_id in self.results:
             if task_id in self.result_queue:
@@ -933,13 +977,7 @@ class MPIController:
         self.result_queue.remove(task_id)
         return task_id, result
 
-    def get_next_result(
-        self,
-    ) -> (
-        tuple[int, tuple[ndarray, ndarray]]
-        | tuple[int, list[tuple[ndarray, ndarray]]]
-        | None
-    ):
+    def get_next_result(self) -> tuple[int, Any] | None:
         """
         Return result of next earlier submitted call whose result has not yet
         been obtained.
@@ -951,8 +989,8 @@ class MPIController:
         assigned to a worker.
 
         :rtype:  object
-        :return: id, return value of call, or None if there are no calls
-                 outstanding at all.
+        :return: id and result of call, as for get_result(), or None if
+                 there are no calls outstanding at all.
         """
         while True:
             # Non-blocking first: pick up anything already arrived and
@@ -987,7 +1025,8 @@ class MPIController:
         If no result is available, returns none.
 
         :rtype:  object
-        :return: id, return value of call, or None of there are no results ready.
+        :return: id and result of call, as for get_result(), or None if
+                 there are no results ready.
         """
         self.process()
         if len(self.result_queue) > 0:
@@ -1009,7 +1048,7 @@ class MPIController:
         If no result is available, returns empty list.
 
         :rtype:  object
-        :return: list of id, return value of call
+        :return: list of (id, result of call), as for get_result()
         """
         self.process()
         ret = []
@@ -1188,13 +1227,13 @@ class MPIController:
 
     def abort(self):
         """
-        Abort execution on all MPI nodes immediately.
+        Abort execution on all MPI nodes immediately, with exit status 1.
 
         Can be called by controller and workers.
         """
         traceback.print_exc()
         logger.error("MPI controller : aborting...")
-        self.comm.Abort()
+        self.comm.Abort(1)
 
     def check_valid_task_id(self, task_id: int) -> bool:
         """
@@ -1308,12 +1347,16 @@ class MPIWorker:
                     "error": failed,
                 }
             )
+            # A failure is sent as its task_failure() description, flagged
+            # in the stats; a return value is sent as a TaskResult.
+            payload = result if failed else TaskResult(result)
             _isend_bytes(
                 self.comm,
-                pickle.dumps((task_id, result, self.stats[-1])),
+                pickle.dumps((task_id, payload, self.stats[-1])),
                 dest=0,
                 tag=MessageTag.DONE.value,
             )
+            payload = None
             # Drop the sent result now rather than holding it, which may be
             # large, until the next call returns.
             result = None
@@ -1321,7 +1364,7 @@ class MPIWorker:
     def abort(self):
         traceback.print_exc()
         logger.info(f"MPI worker {self.worker_id}: aborting...")
-        self.comm.Abort()
+        self.comm.Abort(1)
 
 
 class MPICollectiveWorker:
@@ -1541,7 +1584,7 @@ class MPICollectiveWorker:
         rank = self.comm.rank
         traceback.print_exc()
         logger.info(f"MPI collective worker {self.worker_id}-{rank}: aborting...")
-        self.comm.Abort()
+        self.comm.Abort(1)
 
 
 class MPICollectiveBroker:
@@ -1690,33 +1733,20 @@ class MPICollectiveBroker:
                 "gathering data from workers..."
             )
             results, stats = self.gather_results(this_result, this_stat)
-
-            stat_times = np.asarray([stat["this_time"] for stat in stats])
-            max_time = 0.0
-            if len(stat_times) > 0:
-                max_time = np.argmax(stat_times)
-                stat = stats[max_time]
-            else:
-                stat = None
-            if any(s.get("error") for s in stats):
-                # Report the group's first failure in place of its
-                # results, flagged in the stats sent with it.
-                results = next(
-                    r
-                    for r in results
-                    if isinstance(r, dict) and r.get("distwq_failure")
-                )
-                stat = dict(stat, error=True)
+            # The group's values as a CollectiveTaskResult, or its first
+            # failure in their place, flagged in the stat sent with it.
+            payload, stat = _group_outcome(results, stats)
             logger.info(
                 f"MPI collective broker {self.worker_id}: "
                 "sending results to controller..."
             )
             _isend_bytes(
                 self.comm,
-                pickle.dumps((task_id, results, stat)),
+                pickle.dumps((task_id, payload, stat)),
                 dest=0,
                 tag=MessageTag.DONE.value,
             )
+            results = payload = this_result = None
 
     def scatter_task(
         self,
@@ -1764,8 +1794,7 @@ class MPICollectiveBroker:
                 (this_result, this_stat), root=merged_rank
             )
             req.wait()
-            results = [result for result, stat in sub_data if result is not None]
-            stats = [stat for result, stat in sub_data if stat is not None]
+            results, stats = _split_group_data(sub_data)
         elif self.collective_mode == CollectiveMode.SendRecv:
             reqs = []
             for i in range(
@@ -1786,9 +1815,10 @@ class MPICollectiveBroker:
                 logger.error([MPI.Get_error_string(s.Get_error()) for s in status])
                 raise
             del reqs
-            results = [result for result, stat in sub_data if result is not None]
-            stats = [stat for result, stat in sub_data if stat is not None]
-            if this_result is not None:
+            results, stats = _split_group_data(sub_data)
+            # A working broker always has a stat, even if its call
+            # returned None.
+            if this_stat is not None:
                 results = [this_result] + results
                 stats = [this_stat] + stats
         else:
@@ -1811,7 +1841,7 @@ class MPICollectiveBroker:
         rank = self.comm.rank
         traceback.print_exc()
         logger.info(f"MPI collective broker {rank}: aborting...")
-        self.comm.Abort()
+        self.comm.Abort(1)
 
 
 def do_spawn_workers(
@@ -2593,6 +2623,28 @@ def establish_topology(
     )
 
 
+def release_workers_after_error(controller: MPIController) -> None:
+    """
+    Tell the workers to exit after the controller function has raised.
+
+    Called from inside the handler of that exception.  The workers are
+    told as in a normal exit: results still outstanding are collected
+    and discarded, then every worker is sent EXIT.  If that fails as
+    well, the controller can no longer reach the workers, and the whole
+    job is aborted with a non-zero status.
+    """
+    if not controller.workers_available:
+        return
+    logger.error(
+        "MPI controller : controller function raised an exception; "
+        "telling all workers to exit..."
+    )
+    try:
+        controller.exit()
+    except BaseException:  # noqa: BLE001
+        controller.abort()
+
+
 def run(
     fun_name: str | None = None,
     module_name: str = "__main__",
@@ -2622,6 +2674,12 @@ def run(
     On each worker, run() calls fun() if that is defined, or calls serve()
     otherwise, and returns when fun() returns, or when fun() returns on
     the controller, or when controller calls exit().
+
+    If fun_name() raises an exception on the controller, run() tells the
+    workers to exit, so that run() returns on every worker, and then
+    raises the exception again to its caller.  If an uncaught exception
+    reaches the top level of an MPI program, mpi_excepthook aborts the
+    whole job with a non-zero exit status.
 
     :arg string module_name: module where fun_name is located
     :arg bool verbose: whether processing information should be printed.
@@ -2702,18 +2760,23 @@ def run(
             previous_sigint = signal.signal(
                 signal.SIGINT, lambda signum, frame: controller.abort()
             )
-            try:  # put everything in a try block to be able to exit!
-                results = fun(controller, *args)
-            except ValueError:
-                controller.abort()
-            controller.exit()
-            # The handler refers to this controller; restoring the previous
-            # handler lets the controller and any results it still holds be
-            # freed once run() returns.
-            signal.signal(
-                signal.SIGINT,
-                previous_sigint if previous_sigint is not None else signal.SIG_DFL,
-            )
+            try:
+                try:
+                    results = fun(controller, *args)
+                except BaseException:
+                    # Release the workers, so that they return from run()
+                    # too, and let the caller see the exception.
+                    release_workers_after_error(controller)
+                    raise
+                controller.exit()
+            finally:
+                # The handler refers to this controller; restoring the
+                # previous handler lets the controller and any results it
+                # still holds be freed once run() returns.
+                signal.signal(
+                    signal.SIGINT,
+                    previous_sigint if previous_sigint is not None else signal.SIG_DFL,
+                )
         elif topology.role == "worker":
             worker = topology.server
             if fun is not None:

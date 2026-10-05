@@ -43,26 +43,28 @@ Based on mpi.py from the pyunicorn project.
 # PYTHONPATH must include the directories in which distwq and this file are located.
 
 import distwq
-import numpy as np  
+import numpy as np
 import scipy
 from scipy import signal
+
 
 def do_work(freq):
     fs = 10e3
     N = 1e5
-    amp = 2*np.sqrt(2)
+    amp = 2 * np.sqrt(2)
     freq = float(freq)
     noise_power = 0.001 * fs / 2
     time = np.arange(N) / fs
-    x = amp*np.sin(2*np.pi*freq*time)
+    x = amp * np.sin(2 * np.pi * freq * time)
     x += np.random.normal(scale=np.sqrt(noise_power), size=time.shape)
     f, pdens = signal.periodogram(x, fs)
     return f, pdens
 
+
 def main(controller):
     n = 150
     for i in range(0, n):
-        controller.submit_call("do_work", (i+1,), module_name="example_distwq")
+        controller.submit_call("do_work", (i + 1,), module_name="example_distwq")
     s = []
     for i in range(0, n):
         s.append(controller.get_next_result())
@@ -70,7 +72,8 @@ def main(controller):
     print(s)
     controller.info()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     if distwq.is_controller:
         distwq.run(fun_name="main", verbose=True, nprocs_per_worker=3)
     else:
@@ -79,12 +82,51 @@ if __name__ == '__main__':
 
 ## API
 
+### Result types
+
+Every result that the controller returns is one of:
+
+- `TaskResult(value)`: the return value of a call run by a single-process
+  worker (`MPIWorker`), or by the controller itself when no workers are
+  available;
+- `CollectiveTaskResult(values)`: the return values of a call run by a
+  worker group (`MPICollectiveBroker`); `values[i]` is the value on the
+  i-th process of the group, and `len(values) == nprocs_per_worker`;
+- the description of a failed call, as made by `task_failure()`, when the
+  task id is in `MPIController.failed_tasks`.  Calls only fail this way
+  when errors are captured, as in `distwq.future.DistributedEnvironment`;
+  `run()` does not capture them.
+
+Both classes are frozen dataclasses exported by `distwq`.  Match on the
+type instead of testing whether a result is a list:
+
+```python
+match result:
+    case distwq.TaskResult(value=value):
+        ...
+    case distwq.CollectiveTaskResult(values=values):
+        ...
+```
+
+In `distwq.future`, `future.result()` returns the plain value for
+single-process workers, and a `CollectiveTaskResult` under worker
+grouping.  A grouped environment returns a `CollectiveTaskResult` even
+when it has no workers and the controller runs the call itself.
+
 ### MPIController
 
 #### submit_call
 
 ```python
-submit_call(name_to_call, args=(), kwargs={}, module_name="__main__", time_est=1, task_id=None, worker=None)
+submit_call(
+    name_to_call,
+    args=(),
+    kwargs={},
+    module_name="__main__",
+    time_est=1,
+    task_id=None,
+    worker=None,
+)
 ```
 
 Submit a call for parallel execution.
@@ -100,37 +142,37 @@ executed synchronously on this MPI node.
 1. Provide ids and time estimate explicitly:
 
 ```python
-for n in range(0,10):
-    controller.submit_call("doit", (n,A[n]), task_id=n, time_est=n**2)
+for n in range(0, 10):
+    controller.submit_call("doit", (n, A[n]), task_id=n, time_est=n**2)
 
-for n in range(0,10):
+for n in range(0, 10):
     result[n] = controller.get_result(n)
 ```
 
 2. Use generated ids stored in a list:
 
 ```python
-for n in range(0,10):
-    ids.append(controller.submit_call("doit", (n,A[n])))
+for n in range(0, 10):
+    ids.append(controller.submit_call("doit", (n, A[n])))
 
-for n in range(0,10):
+for n in range(0, 10):
     results.append(controller.get_result(ids.pop()))
 ```
 
 3. Ignore ids altogether:
 
 ```python
-for n in range(0,10):
-    controller.submit_call("doit", (n,A[n]))
+for n in range(0, 10):
+    controller.submit_call("doit", (n, A[n]))
 
-for n in range(0,10):
+for n in range(0, 10):
     results.append(controller.get_next_result())
 ```
 
 4. Call a module function and use keyword arguments:
 
 ```python
-controller.submit_call("solve", (), {"a":a, "b":b}, module_name="numpy.linalg")
+controller.submit_call("solve", (), {"a": a, "b": b}, module_name="numpy.linalg")
 ```
 
 **Parameters:**
@@ -148,7 +190,15 @@ id of call, to be used in get_result().
 #### queue_call
 
 ```python
-queue_call(name_to_call, args=(), kwargs={}, module_name="__main__", time_est=1, task_id=None, requested_worker=None)
+queue_call(
+    name_to_call,
+    args=(),
+    kwargs={},
+    module_name="__main__",
+    time_est=1,
+    task_id=None,
+    requested_worker=None,
+)
 ```
 
 Submit a call for later execution.
@@ -165,7 +215,15 @@ id of call, to be used in get_result().
 #### submit_multiple
 
 ```python
-submit_multiple(name_to_call, args=[], kwargs=[], module_name="__main__", time_est=1, task_ids=None, workers=None)
+submit_multiple(
+    name_to_call,
+    args=[],
+    kwargs=[],
+    module_name="__main__",
+    time_est=1,
+    task_ids=None,
+    workers=None,
+)
 ```
 
 Submit multiple calls for parallel execution.
@@ -204,7 +262,7 @@ Can only be called once per call.
 - `task_id` (int): id of an earlier submitted call, as provided to or returned by submit_call().
 
 **Returns:**
-Tuple of (task_id, return value of call).
+Tuple of (task_id, result of call); see [Result types](#result-types).
 
 #### get_next_result
 
@@ -220,7 +278,7 @@ Can only be called by the controller.
 If the call is not yet finished, waits for it to finish.
 
 **Returns:**
-Tuple of (id, return value of call), or None if there are no more calls in the queue.
+Tuple of (id, result of call), or None if there are no more calls in the queue.
 
 #### probe_next_result
 
@@ -236,7 +294,7 @@ Can only be called by the controller.
 If no result is available, returns None.
 
 **Returns:**
-Tuple of (id, return value of call), or None if there are no results ready.
+Tuple of (id, result of call), or None if there are no results ready.
 
 #### probe_all_next_results
 
@@ -252,7 +310,7 @@ Can only be called by the controller.
 If no result is available, returns empty list.
 
 **Returns:**
-List of tuples (id, return value of call).
+List of tuples (id, result of call).
 
 #### get_ready_worker
 
@@ -401,11 +459,26 @@ Abort execution on all MPI nodes immediately.
 ### run
 
 ```python
-run(fun_name=None, module_name="__main__", broker_fun_name=None, broker_module_name="__main__", 
-    max_workers=-1, worker_grouping_method=GroupingMethod.NoGrouping, sequential_spawn=False, 
-    spawn_startup_wait=None, spawn_executable=None, spawn_args=[], nprocs_per_worker=1, 
-    collective_mode="gather", broker_is_worker=False, worker_service_name="distwq.init", 
-    enable_worker_service=False, time_limit=None, verbose=False, args=())
+run(
+    fun_name=None,
+    module_name="__main__",
+    broker_fun_name=None,
+    broker_module_name="__main__",
+    max_workers=-1,
+    worker_grouping_method=GroupingMethod.NoGrouping,
+    sequential_spawn=False,
+    spawn_startup_wait=None,
+    spawn_executable=None,
+    spawn_args=[],
+    nprocs_per_worker=1,
+    collective_mode="gather",
+    broker_is_worker=False,
+    worker_service_name="distwq.init",
+    enable_worker_service=False,
+    time_limit=None,
+    verbose=False,
+    args=(),
+)
 ```
 
 Run in controller/worker mode until fun(controller/worker) finishes.

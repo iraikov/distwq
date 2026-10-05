@@ -5,7 +5,7 @@ A fake controller stands in for MPIController.  It runs each submitted
 call itself, looking the callable up by module and name as a worker does,
 and delivers the results in an order the test chooses: "fifo" in
 submission order, or "reverse" with the last submitted first.  Reverse
-delivery is what separates ordered from arrival-order behaviour.
+delivery is what separates ordered from arrival-order behavior.
 """
 
 import functools

@@ -114,7 +114,7 @@ def test_failure_on_every_group_member():
         for ctl in env.controller_session():
             with pytest.raises(ValueError, match="cannot handle 3"):
                 ctl.submit(fail_on_three, 3).result()
-            assert ctl.submit(square, 4).result() == [16, 16]
+            assert ctl.submit(square, 4).result().values == [16, 16]
 
 
 @split_groups
@@ -124,4 +124,4 @@ def test_failure_on_non_broker_member_only():
             with pytest.raises(KeyError, match="rank") as info:
                 ctl.submit(fail_on_even_world_rank, 1).result()
             assert isinstance(info.value.__cause__, RemoteTraceback)
-            assert ctl.submit(square, 3).result() == [9, 9]
+            assert ctl.submit(square, 3).result().values == [9, 9]

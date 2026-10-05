@@ -36,7 +36,7 @@ from distwq.future import (
     DistributedEnvironment,
     WorkerGroupConfig,
 )
-from distwq.mpi import GroupingMethod
+from distwq.mpi import CollectiveTaskResult, GroupingMethod
 
 pytestmark = pytest.mark.skipif(SIZE < 2, reason="Requires at least 2 MPI processes")
 
@@ -230,9 +230,8 @@ def test_split_groups_two_sessions():
         for controller in env.controller_session():
             results.append(controller.submit(scale, 5).result())
     if IS_CONTROLLER:
-        # A broker returns the list of results from every process in its
-        # group.
-        assert results == [[7, 7], [10, 10]]
+        # A broker returns the results from every process in its group.
+        assert results == [CollectiveTaskResult([7, 7]), CollectiveTaskResult([10, 10])]
 
 
 @pytest.mark.skipif(
@@ -252,4 +251,4 @@ def test_spawn_groups_two_sessions():
         for controller in env.controller_session():
             results.append(controller.submit(scale, 5).result())
     if IS_CONTROLLER:
-        assert results == [[7, 7], [10, 10]]
+        assert results == [CollectiveTaskResult([7, 7]), CollectiveTaskResult([10, 10])]

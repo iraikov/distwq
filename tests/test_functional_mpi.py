@@ -30,7 +30,7 @@ from distwq.functional import (
     run_session,
 )
 from distwq.future import Config, DistributedEnvironment, WorkerGroupConfig
-from distwq.mpi import GroupingMethod
+from distwq.mpi import CollectiveTaskResult, GroupingMethod
 from distwq.workflow import adaptive_parameter_exploration, parameter_sweep
 
 pytestmark = pytest.mark.skipif(SIZE < 2, reason="Requires at least 2 MPI processes")
@@ -119,5 +119,8 @@ def test_quick_map_with_split_groups():
         nprocs_per_worker=2,
         broker_is_worker=True,
     )
-    # Each broker returns the results of both processes in its group.
-    assert quick_map(square, [3, 4], worker_config=worker_config) == [[9, 9], [16, 16]]
+    # Each broker returns the results of both processes in its group, on
+    # every rank.
+    results = quick_map(square, [3, 4], worker_config=worker_config)
+    assert all(isinstance(r, CollectiveTaskResult) for r in results)
+    assert [r.values for r in results] == [[9, 9], [16, 16]]

@@ -15,10 +15,13 @@ from typing import (
 # Import from mpi.py to access MPI functionality
 try:
     from .mpi import (
+        CollectiveTaskResult,
         GroupingMethod,
         MessageTag,
         MPIController,
+        TaskResult,
         Topology,
+        check_worker_grouping_method,
         controller_rank,
         establish_topology,
         has_mpi,
@@ -31,10 +34,13 @@ try:
 except ImportError:
     # Try absolute import
     from mpi import (
+        CollectiveTaskResult,
         GroupingMethod,
         MessageTag,
         MPIController,
+        TaskResult,
         Topology,
+        check_worker_grouping_method,
         controller_rank,
         establish_topology,
         has_mpi,
@@ -200,6 +206,18 @@ def task_reference(func: Callable) -> tuple[str, str]:
     return name, module_name
 
 
+def requests_grouping(worker_config: "WorkerGroupConfig | None") -> bool:
+    """True if worker_config asks for worker groups.
+
+    GroupSpawn and GroupSplit ask for groups, and so does NoGrouping with
+    nprocs_per_worker > 1, which establish_topology() treats as GroupSplit.
+    """
+    if worker_config is None:
+        return False
+    method = check_worker_grouping_method(worker_config.grouping_method)
+    return method != GroupingMethod.NoGrouping or worker_config.nprocs_per_worker > 1
+
+
 class DistributedFuture(Generic[R]):
     """Result of a task submitted through a TaskController.
 
@@ -233,7 +251,13 @@ class DistributedFuture(Generic[R]):
         return self._done
 
     def result(self, timeout: float | None = None) -> R:
-        """Return the task's result, waiting up to timeout seconds for it."""
+        """Return the task's result, waiting up to timeout seconds for it.
+
+        Without worker grouping this is the task's return value.  Under
+        worker grouping it is a CollectiveTaskResult, whose values hold
+        the return value of each process in the group.  If the task
+        raised an exception, that exception is raised here.
+        """
         self._context._wait(self, timeout)
         if self._exception is not None:
             raise self._exception
@@ -301,6 +325,7 @@ class TaskController:
 
         self._env = execution_context
         self._controller = execution_context._controller
+        self._grouped = requests_grouping(execution_context.worker_config)
         # Futures still waiting for their result, by task id.
         self._pending: dict[int, DistributedFuture] = {}
         # Results that arrived for a task id with no registered future,
@@ -405,7 +430,23 @@ class TaskController:
         if failed:
             future._fail(exception_from_failure(value), self._next_completion_index())
         else:
-            future._resolve(value, self._next_completion_index())
+            future._resolve(self._unwrap(value), self._next_completion_index())
+
+    def _unwrap(self, value: Any) -> Any:
+        """Turn a result from the controller into what result() returns.
+
+        A TaskResult gives its plain value.  Under worker grouping it gives
+        a CollectiveTaskResult instead, which happens when the controller
+        ran the task itself because there were no workers; so a grouped
+        environment always returns a CollectiveTaskResult, however many
+        ranks it runs on.  A CollectiveTaskResult, and any other value, is
+        returned as it is.
+        """
+        if isinstance(value, TaskResult):
+            if self._grouped:
+                return CollectiveTaskResult([value.value])
+            return value.value
+        return value
 
     def _next_completion_index(self) -> int:
         index = self._completion_counter
@@ -811,6 +852,9 @@ class DistributedEnvironment:
             self._controller = MPIController(
                 self._topology.controller_worker_comm,
                 time_limit=getattr(self.config.execution, "timeout", None),
+                # A task run on the controller itself, when there are no
+                # workers, also raises from its future's result().
+                capture_errors=True,
             )
         else:
             self._server = self._topology.server

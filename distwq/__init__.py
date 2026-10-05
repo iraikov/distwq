@@ -15,12 +15,14 @@ imported, and are copied here at that time.
 
 from .mpi import (
     CollectiveMode,
+    CollectiveTaskResult,
     GroupingMethod,
     MessageTag,
     MPICollectiveBroker,
     MPICollectiveWorker,
     MPIController,
     MPIWorker,
+    TaskResult,
     Topology,
     call_task,
     check_spawn_config,
@@ -54,12 +56,14 @@ from .mpi import (
 
 __all__ = [
     "CollectiveMode",
+    "CollectiveTaskResult",
     "GroupingMethod",
     "MPICollectiveBroker",
     "MPICollectiveWorker",
     "MPIController",
     "MPIWorker",
     "MessageTag",
+    "TaskResult",
     "Topology",
     "call_task",
     "check_spawn_config",

@@ -12,7 +12,8 @@ A worker group is nprocs_per_worker processes that each run every task
 sent to the group, plus one broker process that relays tasks from the
 controller.  With broker_is_worker=True the broker is one of those
 processes; otherwise it is an extra process that only relays.  A group
-task's result is the list of results from the processes that ran it.
+task's future returns a CollectiveTaskResult, whose values are the results
+from the nprocs_per_worker processes that ran it.
 
 Spawned groups are tested only when DISTWQ_TEST_SPAWN=1, since spawning
 does not work with every MPI installation.
@@ -37,7 +38,7 @@ from distwq.future import (
     WorkerGroupConfig,
     create_split_environment,
 )
-from distwq.mpi import GroupingMethod
+from distwq.mpi import CollectiveTaskResult, GroupingMethod
 
 pytestmark = pytest.mark.skipif(SIZE < 3, reason="Requires at least 3 MPI processes")
 
@@ -46,6 +47,16 @@ IS_CONTROLLER = RANK == 0
 
 def square(x):
     return x * x
+
+
+def nothing(x):
+    return None
+
+
+def values_of(results):
+    """The values of each CollectiveTaskResult in results."""
+    assert all(isinstance(r, CollectiveTaskResult) for r in results), results
+    return [r.values for r in results]
 
 
 def processes_per_group(nprocs_per_worker, broker_is_worker):
@@ -62,9 +73,11 @@ def run_two_sessions(worker_config):
     with DistributedEnvironment(Config(), worker_config) as env:
         for ctl in env.controller_session():
             seen["worker_count"] = env.worker_count
-            seen["submit"] = ctl.submit(square, 3).result()
+            seen["submit"] = values_of([ctl.submit(square, 3).result()])[0]
+            # A task returning None still gives one value per process.
+            seen["none"] = values_of([ctl.submit(nothing, 0).result()])[0]
         for ctl in env.controller_session():
-            seen["map"] = map_distributed(ctl, square, range(4))
+            seen["map"] = values_of(map_distributed(ctl, square, range(4)))
     return seen
 
 
@@ -75,6 +88,7 @@ LAYOUTS = [
     (2, True, "gather"),
     (2, False, "gather"),
     (2, True, "sendrecv"),
+    (2, False, "sendrecv"),
     (3, True, "gather"),
 ]
 
@@ -94,7 +108,19 @@ def test_split_layout(nprocs, broker_is_worker, collective_mode):
         n_groups = (SIZE - 1) // processes_per_group(nprocs, broker_is_worker)
         assert seen["worker_count"] == n_groups
         assert seen["submit"] == [9] * nprocs
+        assert seen["none"] == [None] * nprocs
         assert seen["map"] == [[x * x] * nprocs for x in range(4)]
+
+
+def test_single_process_workers_return_plain_values():
+    # Without grouping a future returns the task's value itself.
+    with DistributedEnvironment(Config(), WorkerGroupConfig()) as env:
+        results = None
+        for ctl in env.controller_session():
+            results = [ctl.submit(square, 3).result(), ctl.submit(nothing, 0).result()]
+            results.append(map_distributed(ctl, square, [1, 2]))
+    if IS_CONTROLLER:
+        assert results == [9, None, [1, 4]]
 
 
 def test_no_grouping_with_several_processes_means_split():
@@ -113,7 +139,7 @@ def test_create_split_environment():
     results = None
     with create_split_environment(nprocs_per_worker=2, broker_is_worker=True) as env:
         for ctl in env.controller_session():
-            results = map_distributed(ctl, square, [1, 2])
+            results = values_of(map_distributed(ctl, square, [1, 2]))
         assert env.total_cores == env.worker_count * 2
     if IS_CONTROLLER:
         assert results == [[1, 1], [4, 4]]
@@ -130,7 +156,7 @@ def test_broadcast_reaches_every_group_member():
     with DistributedEnvironment(Config(), worker_config) as env:
         results = None
         for ctl in env.controller_session():
-            results = map_distributed(ctl, square, [2, 3])
+            results = values_of(map_distributed(ctl, square, [2, 3]))
         # Brokers and the other group members alike receive the value.
         assert env.broadcast(results) == [[4, 4], [9, 9]]
 
@@ -150,3 +176,4 @@ def test_spawn_layout(nprocs):
     if IS_CONTROLLER:
         assert seen["worker_count"] == SIZE - 1
         assert seen["submit"] == [9] * nprocs
+        assert seen["none"] == [None] * nprocs
