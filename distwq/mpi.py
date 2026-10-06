@@ -1431,6 +1431,22 @@ class MPIWorker:
         self.comm.Abort(1)
 
 
+def _leave_group(merged_comm: Intracomm, spawn_comm: Intercomm | None) -> None:
+    """Disconnect from a worker group; every member of the group calls this.
+
+    A split group lives in one job, and its merged communicator is
+    disconnected.  A spawned group joins two jobs; there the merged
+    communicator is freed and the intercommunicator from MPI_Comm_spawn
+    is disconnected instead, because disconnecting a merged communicator
+    that spans jobs does not complete under Open MPI.
+    """
+    if spawn_comm is None:
+        merged_comm.Disconnect()
+    else:
+        merged_comm.Free()
+        spawn_comm.Disconnect()
+
+
 class MPICollectiveWorker:
     def __init__(
         self,
@@ -1441,6 +1457,7 @@ class MPICollectiveWorker:
         worker_service_name: str = "distwq.init",
         collective_mode: CollectiveMode = CollectiveMode.Gather,
         capture_errors: bool = False,
+        spawn_comm: Intercomm | None = None,
     ):
         size = comm.size
         rank = comm.rank
@@ -1453,6 +1470,9 @@ class MPICollectiveWorker:
         self.worker_id = worker_id
         self.comm = comm
         self.merged_comm = merged_comm
+        # The intercommunicator to the broker, for a spawned worker; None
+        # in a split group.
+        self.spawn_comm = spawn_comm
 
         self.worker_port = None
         self.server_worker_comm = None
@@ -1583,7 +1603,7 @@ class MPICollectiveWorker:
                 if self.service_published and (rank == 0):
                     MPI.Unpublish_name(self.worker_service_name, self.worker_port)
                     MPI.Close_port(self.worker_port)
-                self.merged_comm.Disconnect()
+                _leave_group(self.merged_comm, self.spawn_comm)
                 return MessageTag.EXIT
             self.total_time_est[rank] += time_est
             call_time = time.time()
@@ -1663,6 +1683,7 @@ class MPICollectiveBroker:
         is_worker: bool = False,
         collective_mode: CollectiveMode = CollectiveMode.Gather,
         capture_errors: bool = False,
+        spawn_comm: Intercomm | None = None,
     ) -> None:
         logger.info(f"MPI collective broker {worker_id} starting")
         assert not spawned
@@ -1676,6 +1697,9 @@ class MPICollectiveBroker:
         self.comm = comm
         self.group_comm = group_comm
         self.merged_comm = merged_comm
+        # The intercommunicator to the spawned workers, from
+        # MPI_Comm_spawn; None in a split group.
+        self.spawn_comm = spawn_comm
         self.worker_id = worker_id
         self.nprocs_per_worker = nprocs_per_worker
 
@@ -1745,6 +1769,9 @@ class MPICollectiveBroker:
             if tag == MessageTag.EXIT.value:
                 logger.info(f"MPI collective broker {self.worker_id}: exiting...")
                 self.scatter_task("exit", (), {}, "", 0, 0)
+                # The collective workers leave the group when told to exit,
+                # and leaving is collective, so the broker leaves with them.
+                _leave_group(self.merged_comm, self.spawn_comm)
                 return MessageTag.EXIT
             elif tag == MessageTag.SESSION_END.value:
                 logger.info(f"MPI collective broker {self.worker_id}: session ended.")
@@ -2237,7 +2264,7 @@ def setup_spawn_group(
         enable_worker_service,
         broker_fun,
     )
-    _sub_comm, merged_comm, collective_mode_arg = do_spawn_workers(
+    spawn_comm, merged_comm, collective_mode_arg = do_spawn_workers(
         fun,
         fun_name,
         module_name,
@@ -2266,6 +2293,7 @@ def setup_spawn_group(
         is_worker=broker_is_worker,
         collective_mode=collective_mode_arg,
         capture_errors=capture_errors,
+        spawn_comm=spawn_comm,
     )
     if fun is not None:
         req = merged_comm.Ibarrier()
@@ -2906,6 +2934,7 @@ def worker_main():
             collective_mode=collective_mode_arg,
             worker_service_name=worker_service_name,
             capture_errors=bool(my_config.get("capture_errors", False)),
+            spawn_comm=parent_comm,
         )
         fun = None
         if "init_fun_name" in my_config:
