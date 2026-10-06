@@ -1,28 +1,23 @@
 # Hierarchical Configuration Design
 
-import sys
 import importlib
-from dataclasses import dataclass, replace
-from typing import Optional, Callable, Union, Any, List
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from enum import Enum
+from typing import Any
 
 try:
     from .mpi import (
-        GroupingMethod,
         CollectiveMode,
-        has_mpi,
-        world_comm,
+        GroupingMethod,
         check_spawn_config,
-        check_split_config,
     )
 except ImportError:
     from mpi import (
-        GroupingMethod,
         CollectiveMode,
-        has_mpi,
-        world_comm,
+        GroupingMethod,
         check_spawn_config,
-        check_split_config,
     )
 
 
@@ -48,7 +43,7 @@ class ResourceConfig:
 
     max_workers: int = -1  # -1 = use all available
     cores_per_worker: int = 1
-    memory_per_worker: Optional[str] = None  # e.g., "2GB", "512MB"
+    memory_per_worker: str | None = None  # e.g., "2GB", "512MB"
     gpu_per_worker: int = 0
 
     def with_workers(self, n: int) -> "ResourceConfig":
@@ -62,11 +57,11 @@ class ResourceConfig:
 class ExecutionConfig:
     """Execution behavior configuration"""
 
-    timeout: Optional[int] = None  # Total execution timeout
-    task_timeout: Optional[int] = None  # Per-task timeout
+    timeout: int | None = None  # Total execution timeout
+    task_timeout: int | None = None  # Per-task timeout
     retry_attempts: int = 0  # Retry failed tasks
     fail_fast: bool = True  # Stop on first failure
-    progress_callback: Optional[Callable] = None
+    progress_callback: Callable | None = None
 
     def with_timeout(self, seconds: int) -> "ExecutionConfig":
         return replace(self, timeout=seconds)
@@ -83,7 +78,7 @@ class MPIConfig:
     collective_mode: CollectiveMode = CollectiveMode.Gather
     broker_is_worker: bool = False
     sequential_spawn: bool = False
-    spawn_startup_wait: Optional[int] = None
+    spawn_startup_wait: int | None = None
     worker_service_name: str = "distwq.service"
 
     def with_spawn_method(self, method: SpawnMethod) -> "MPIConfig":
@@ -97,7 +92,7 @@ class LoggingConfig:
     verbose: bool = False
     profile: bool = False
     log_level: str = "INFO"
-    stats_callback: Optional[Callable] = None
+    stats_callback: Callable | None = None
 
     def with_verbose(self, enabled: bool = True) -> "LoggingConfig":
         return replace(self, verbose=enabled)
@@ -108,16 +103,16 @@ class WorkerGroupConfig:
 
     def __init__(
         self,
-        grouping_method: Union[str, GroupingMethod] = GroupingMethod.NoGrouping,
+        grouping_method: str | GroupingMethod = GroupingMethod.NoGrouping,
         nprocs_per_worker: int = 1,
         broker_is_worker: bool = False,
         collective_mode: str = "gather",
         enable_worker_service: bool = False,
         worker_service_name: str = "distwq.init",
         sequential_spawn: bool = False,
-        spawn_startup_wait: Optional[int] = None,
-        spawn_executable: Optional[str] = None,
-        spawn_args: List[Any] = None,
+        spawn_startup_wait: int | None = None,
+        spawn_executable: str | None = None,
+        spawn_args: list[Any] | None = None,
     ):
         if isinstance(grouping_method, str):
             if grouping_method.lower() == "spawn":
@@ -154,15 +149,10 @@ class WorkerGroupConfig:
                 enable_worker_service=self.enable_worker_service,
                 broker_fun=None,  # We don't use broker_fun in futures interface
             )
-        elif self.grouping_method == GroupingMethod.GroupSplit:
-            if has_mpi:
-                check_split_config(
-                    split_workers=True,
-                    nprocs_per_worker=self.nprocs_per_worker,
-                    broker_is_worker=self.broker_is_worker,
-                    broker_fun=None,  # We don't use broker_fun in futures interface
-                    world_size=world_comm.size if world_comm else 1,
-                )
+        # A split configuration is checked against the number of worker
+        # ranks when the environment is entered (establish_topology()),
+        # because a max_workers limit can make it smaller than the world
+        # size implies.
 
 
 @dataclass(frozen=True)
@@ -171,7 +161,7 @@ class Config:
 
     resources: ResourceConfig = ResourceConfig()
     execution: ExecutionConfig = ExecutionConfig()
-    grouping: WorkerGroupConfig = WorkerGroupConfig()
+    grouping: WorkerGroupConfig = field(default_factory=WorkerGroupConfig)
     mpi: MPIConfig = MPIConfig()
     logging: LoggingConfig = LoggingConfig()
 

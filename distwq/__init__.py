@@ -10,7 +10,10 @@ distwq was a single module.  The task-centric interface is in
 
 The role flags (``is_controller``, ``is_worker``, ``spawned``, ``rank``,
 ``size`` and so on) are set once, when :mod:`distwq.mpi` is first
-imported, and are copied here at that time.
+imported, and are copied here at that time.  ``n_workers`` and
+``is_worker`` can change afterwards, when a ``max_workers`` limit is
+applied (see ``distwq.mpi.limit_workers``); read them from :mod:`distwq.mpi`
+for the current values.
 """
 
 from .mpi import (
@@ -36,6 +39,7 @@ from .mpi import (
     has_mpi,
     is_controller,
     is_worker,
+    limit_workers,
     multiple_task_arguments,
     my_args,
     my_config,
@@ -77,6 +81,7 @@ __all__ = [
     "has_mpi",
     "is_controller",
     "is_worker",
+    "limit_workers",
     "multiple_task_arguments",
     "my_args",
     "my_config",

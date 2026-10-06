@@ -197,7 +197,60 @@ if spawned:
 n_workers = (
     int(my_config["n_workers"]) if spawned and isinstance(my_config, dict) else size - 1
 )
+# The number of worker ranks before any max_workers limit; limit_workers()
+# always starts again from this value.
+_world_workers = n_workers
 start_time = time.time()
+
+
+def _limited_roles(
+    max_workers: int | None,
+    world_workers: int,
+    rank: int,
+    controller_rank: int,
+    is_controller: bool,
+) -> tuple[int, bool]:
+    """Return (n_workers, is_worker) for this rank under a max_workers limit.
+
+    A max_workers of None, zero or less means no limit.  The ranks kept as
+    workers are those with the lowest worker index, where a rank's worker
+    index is its position among the ranks other than the controller.  The
+    controller is never a worker.
+    """
+    if max_workers is None or max_workers <= 0:
+        limited = world_workers
+    else:
+        limited = min(max_workers, world_workers)
+    worker_index = rank if rank < controller_rank else rank - 1
+    return limited, (not is_controller) and worker_index < limited
+
+
+def limit_workers(max_workers: int | None) -> int:
+    """Use at most max_workers worker ranks; return the number used.
+
+    Sets the module values n_workers and is_worker, which
+    establish_topology() reads.  Ranks left out become idle ranks.  A
+    max_workers of None, zero or less means every worker rank is used.
+    Each call starts again from the full set of worker ranks, so a later
+    call can raise the limit again.
+
+    Every rank must call this with the same value before
+    establish_topology().  Spawned processes, runs without MPI and runs
+    on one rank are left unchanged.
+    """
+    global n_workers, is_worker
+    if max_workers is not None and (
+        isinstance(max_workers, bool) or not isinstance(max_workers, int)
+    ):
+        raise TypeError(
+            f"max_workers must be an int or None, not {type(max_workers).__name__}"
+        )
+    if spawned or not has_mpi or size < 2:
+        return n_workers
+    n_workers, is_worker = _limited_roles(
+        max_workers, _world_workers, rank, controller_rank, is_controller
+    )
+    return n_workers
 
 
 def multiple_task_arguments(N, args, kwargs, task_ids, workers):
@@ -1062,15 +1115,15 @@ class MPIController:
 
         return ret
 
-    def info(self) -> None:
+    def summary(self) -> str:
         """
-        Print processing statistics.
+        Return processing statistics as text, or "" if no call has finished.
 
         Can only be called by the controller.
         """
 
         if len(self.stats) == 0:
-            return
+            return ""
 
         call_times = np.array([s["this_time"] for s in self.stats])
         call_quotients = np.array([s["time_over_est"] for s in self.stats])
@@ -1079,7 +1132,7 @@ class MPIController:
         if self.workers_available:
             worker_quotients = self.total_time / self.total_time_est
             cvar_worker_quotients = worker_quotients.std() / worker_quotients.mean()
-            print(
+            return (
                 "\n"
                 "distwq run statistics\n"
                 "==========================\n"
@@ -1096,7 +1149,9 @@ class MPIController:
                 "     coeff. of var. of actual over estd. time per call: "
                 f"{cvar_call_quotients:.04f}\n"
                 "     workers:                      "
-                f"{n_workers}\n"
+                # The workers of this controller, which are the brokers
+                # under worker grouping.
+                f"{self.comm.size - 1}\n"
                 "     mean calls per worker:        "
                 f"{self.n_processed[1:].mean():.04f}\n"
                 "     std.dev. of calls per worker: "
@@ -1112,24 +1167,33 @@ class MPIController:
                 "     coeff. of var. of actual over estd. time per worker: "
                 f"{cvar_worker_quotients:.04f}\n"
             )
-        else:
-            print(
-                "\n"
-                "distwq run statistics\n"
-                "==========================\n"
-                "     results collected:         "
-                f"{self.n_processed[0]}\n"
-                "     results not yet collected: "
-                f"{len(self.task_queue)}\n"
-                "     total reported time:       "
-                f"{call_times.sum():.04f}\n"
-                "     mean time per call:        "
-                f"{call_times.mean():.04f}\n"
-                "     std.dev. of time per call: "
-                f"{call_times.std():.04f}\n"
-                "     coeff. of var. of actual over estd. time per call: "
-                f"{cvar_call_quotients:.04f}\n"
-            )
+        return (
+            "\n"
+            "distwq run statistics\n"
+            "==========================\n"
+            "     results collected:         "
+            f"{self.n_processed[0]}\n"
+            "     results not yet collected: "
+            f"{len(self.task_queue)}\n"
+            "     total reported time:       "
+            f"{call_times.sum():.04f}\n"
+            "     mean time per call:        "
+            f"{call_times.mean():.04f}\n"
+            "     std.dev. of time per call: "
+            f"{call_times.std():.04f}\n"
+            "     coeff. of var. of actual over estd. time per call: "
+            f"{cvar_call_quotients:.04f}\n"
+        )
+
+    def info(self) -> None:
+        """
+        Print processing statistics (see summary()).
+
+        Can only be called by the controller.
+        """
+        text = self.summary()
+        if text:
+            print(text)
 
     def exit(self) -> None:
         """
@@ -2097,6 +2161,10 @@ def check_split_config(
     broker_fun: None,
     world_size: int,
 ) -> None:
+    """Raise RuntimeError if the split configuration cannot be used.
+
+    world_size counts the worker processes plus one for the controller.
+    """
     if broker_fun is not None:
         if split_workers is not True:
             raise RuntimeError(
@@ -2114,17 +2182,19 @@ def check_split_config(
                 raise RuntimeError(
                     "distwq.run: unable to split workers evenly "
                     f"into groups of {nprocs_per_worker} "
-                    f"when world size is {world_size} "
-                    "(1 process is needed for controller)"
+                    f"when there are {world_size - 1} worker processes "
+                    "(the world size, or max_workers, less 1 process "
+                    "for the controller)"
                 )
         else:
             if (world_size - 1) % (nprocs_per_worker + 1) != 0:
                 raise RuntimeError(
                     f"distwq.run: unable to split workers evenly "
                     f"into groups of {nprocs_per_worker + 1} "
-                    f"when world size is {world_size} "
-                    "(1 process is needed for controller; "
-                    "1 process per worker group is needed for brokers)"
+                    f"when there are {world_size - 1} worker processes "
+                    "(the world size, or max_workers, less 1 process "
+                    "for the controller; 1 process per worker group is "
+                    "needed for brokers)"
                 )
 
 
@@ -2287,12 +2357,15 @@ def setup_split_group(
     """
     broker = None
     worker = None
+    # group_comm holds the worker ranks only, which max_workers can make
+    # fewer than the world size implies; the size given counts one more
+    # rank, for the controller.
     check_split_config(
         split_workers,
         nprocs_per_worker,
         broker_is_worker,
         broker_fun,
-        world_comm.size,
+        group_comm.size + 1,
     )
     _sub_comm, local_comm, merged_comm, collective_mode_arg = do_split_workers(
         fun,
@@ -2504,8 +2577,11 @@ def establish_topology(
             True, nprocs_per_worker, broker_is_worker, enable_worker_service, broker_fun
         )
     elif method == GroupingMethod.GroupSplit:
+        # Only the worker ranks are split into groups, which max_workers can
+        # make fewer than the world size implies; the size given counts one
+        # more rank, for the controller.
         check_split_config(
-            True, nprocs_per_worker, broker_is_worker, broker_fun, world_size
+            True, nprocs_per_worker, broker_is_worker, broker_fun, n_workers + 1
         )
 
     group_id, group_comm = get_group_comm(
@@ -2724,10 +2800,7 @@ def run(
 
     worker_grouping_method = check_worker_grouping_method(worker_grouping_method)
 
-    global n_workers, is_worker
-    if max_workers > 0:
-        n_workers = min(max_workers, n_workers)
-        is_worker = (not is_controller) and (rank - 1) < n_workers
+    limit_workers(max_workers)
 
     fun = get_fun(fun_name, module_name)
     broker_fun = get_fun(broker_fun_name, module_name)

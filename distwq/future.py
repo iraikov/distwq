@@ -12,8 +12,10 @@ from typing import (
     TypeVar,
 )
 
-# Import from mpi.py to access MPI functionality
+# Import from mpi.py to access MPI functionality.  The module itself is
+# also kept, for the values that limit_workers() changes after import.
 try:
+    from . import mpi as _mpi
     from .mpi import (
         CollectiveTaskResult,
         GroupingMethod,
@@ -26,13 +28,13 @@ try:
         establish_topology,
         has_mpi,
         is_controller,
-        is_worker,
         rank,
         worker_main,
         world_comm,
     )
 except ImportError:
     # Try absolute import
+    import mpi as _mpi
     from mpi import (
         CollectiveTaskResult,
         GroupingMethod,
@@ -45,7 +47,6 @@ except ImportError:
         establish_topology,
         has_mpi,
         is_controller,
-        is_worker,
         rank,
         worker_main,
         world_comm,
@@ -411,6 +412,34 @@ class TaskController:
         if self._controller and hasattr(self._controller, "n_workers"):
             return self._controller.n_workers
         return 0
+
+    @property
+    def stats(self) -> tuple[dict[str, Any], ...]:
+        """Processing statistics of every call finished so far, oldest first.
+
+        One dict per call, as described for MPIController.stats, with keys
+        "id", "rank", "this_time", "time_over_est", "n_processed",
+        "total_time" and, for calls whose errors were captured, "error".
+        The calls of earlier sessions in the same environment are included.
+        The value is a copy: changing it does not change the controller.
+        """
+        if not self._controller:
+            return ()
+        return tuple(dict(s) for s in self._controller.stats)
+
+    def info(self) -> str:
+        """Log processing statistics at INFO level and return them as text.
+
+        The text is that of MPIController.summary(), covering every call
+        finished so far in this environment.  Returns "" and logs nothing
+        if no call has finished.
+        """
+        if not self._controller:
+            return ""
+        text = self._controller.summary()
+        if text:
+            logger.info(text)
+        return text
 
     def _estimate_task_time(self, func: Callable, args: tuple, kwargs: dict) -> int:
         """Estimate task execution time for scheduling"""
@@ -804,7 +833,8 @@ class DistributedEnvironment:
             # Under worker grouping the controller's workers are the brokers.
             return self._controller.comm.size - 1
         if has_mpi and world_comm:
-            return world_comm.size - 1  # Total ranks minus controller
+            # Worker ranks, after any max_workers limit.
+            return _mpi.n_workers
         return 0
 
     @property
@@ -824,9 +854,15 @@ class DistributedEnvironment:
                 "cannot be nested"
             )
 
+        # Applied on every rank before any MPI call, so that all ranks
+        # agree on which ranks are workers; every rank must give the same
+        # value.  The limit stays in effect until the next run() or
+        # environment sets it again.
+        _mpi.limit_workers(getattr(self.config.resources, "max_workers", -1))
+
         logger.info(
             "Setting up distributed environment: "
-            f"is_controller={is_controller}, is_worker={is_worker}"
+            f"is_controller={is_controller}, is_worker={_mpi.is_worker}"
         )
 
         wc = self.worker_config or WorkerGroupConfig()
@@ -926,5 +962,5 @@ def create_split_environment(
 # Auto-initialization for workers
 if __name__ == "__main__":
     # When this module is run directly (e.g., by spawned workers)
-    if is_worker and has_mpi:
+    if _mpi.is_worker and has_mpi:
         worker_main()
