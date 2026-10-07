@@ -2225,6 +2225,32 @@ def check_split_config(
                 )
 
 
+def _call_init(
+    fun: Callable,
+    server: Any,
+    args: tuple[Any, ...],
+    what: str,
+    abort_comm: Intracomm | None = None,
+) -> None:
+    """Call an init function as fun(server, *args); abort the job if it raises.
+
+    An init function runs on one process while the others go on with
+    their own part of the setup, or wait for work.  An exception left to
+    propagate from it would stop only this process, and the rest of the
+    job would wait for it forever.  So the exception is logged with its
+    traceback, and abort_comm (by default the world communicator) is
+    aborted with exit status 1.
+    """
+    try:
+        fun(server, *args)
+    except BaseException:
+        logger.exception(f"distwq: {what} raised an exception; aborting the job")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        (abort_comm if abort_comm is not None else MPI.COMM_WORLD).Abort(1)
+        raise
+
+
 def setup_spawn_group(
     worker_id,
     spawn_workers,
@@ -2300,9 +2326,9 @@ def setup_spawn_group(
         merged_comm.bcast(args, root=0)
         req.wait()
         if broker_is_worker:
-            fun(broker, *args)
+            _call_init(fun, broker, args, "worker init function")
     if broker_fun is not None:
-        broker_fun(broker, *args)
+        _call_init(broker_fun, broker, args, "broker init function")
     return broker
 
 
@@ -2439,13 +2465,15 @@ def setup_split_group(
         req = merged_comm.Ibarrier()
         merged_comm.bcast(args, root=0)
         req.wait()
+        # A broker that only relays calls computes nothing, so it runs no
+        # worker init function; broker_fun is its init function.
         if is_broker and broker_is_worker:
-            fun(broker, *args)
-        elif is_worker:
-            fun(worker, *args)
+            _call_init(fun, broker, args, "worker init function")
+        elif not is_broker:
+            _call_init(fun, worker, args, "worker init function")
     if is_broker:
         if broker_fun is not None:
-            broker_fun(broker, *args)
+            _call_init(broker_fun, broker, args, "broker init function")
         return broker
     return worker
 
@@ -2567,8 +2595,10 @@ def establish_topology(
 
     Under GroupSpawn or GroupSplit, fun, broker_fun and args are passed to
     setup_spawn_group() or setup_split_group(), which call them on the
-    group's processes.  Without grouping they are not used here; run()
-    calls fun on each worker itself.
+    group's processes.  Without grouping they are not used here: the
+    caller, run() or DistributedEnvironment, calls fun on each worker
+    itself.  An init function that raises aborts the whole job (see
+    _call_init()).
 
     NoGrouping with nprocs_per_worker > 1 is treated as GroupSplit, as
     run() has always done.
@@ -2881,7 +2911,7 @@ def run(
         elif topology.role == "worker":
             worker = topology.server
             if fun is not None:
-                fun(worker, *args)
+                _call_init(fun, worker, args, f"worker function {fun_name}")
             worker.serve()
         elif topology.role in ("broker", "collective_worker"):
             # Worker groups already ran fun and broker_fun during setup.
@@ -2940,9 +2970,17 @@ def worker_main():
         if "init_fun_name" in my_config:
             fun_name = my_config["init_fun_name"]
             module = my_config["init_module_name"]
-            if module not in sys.modules:
-                importlib.import_module(module)
-            fun = eval(fun_name, sys.modules[module].__dict__)
+            try:
+                fun = get_fun(fun_name, module)
+            except BaseException:
+                # The broker is waiting to send the init arguments; abort
+                # rather than leave it, and the controller, waiting.
+                logger.exception(
+                    f"MPI collective worker {worker_id}-{rank}: cannot find "
+                    f"init function {fun_name} in module {module}; aborting"
+                )
+                merged_comm.Abort(1)
+                raise
         if fun is not None:
             if enable_worker_service and (worker_id == 1):
                 worker.publish_service()
@@ -2951,7 +2989,9 @@ def worker_main():
             req.wait()
             if enable_worker_service:
                 worker.connect_service(n_lookup_attempts=5)
-            fun(worker, *args)
+            _call_init(
+                fun, worker, args, "worker init function", abort_comm=merged_comm
+            )
         # A spawned worker runs no user code between sessions, so it simply
         # serves again after each session until told to exit.
         while worker.serve() != MessageTag.EXIT:

@@ -243,3 +243,45 @@ def test_map_returns_results_in_submission_order(controller):
         ("value", 1),
         ("value", 2),
     ]
+
+
+def test_wait_first_completed_uses_result_received_in_submit(controller):
+    # The DONE message for the last outstanding task is handled inside
+    # submit(), as MPIController.submit_call() does by calling process().
+    # No further message will come, so a blocking probe would never return;
+    # the fake raises in that case.
+    ctl, fake = controller
+    first = ctl.submit(square, 0)
+    fake.arrivals.append([first.task_id])
+    done, _ = wait([first], return_when=FIRST_COMPLETED)
+    assert done == {first}
+
+    def submit_and_receive(*args, **kwargs):
+        task_id = FakeController.submit_call(fake, *args, **kwargs)
+        fake.assigned.pop(task_id)
+        fake.results[task_id] = fake.values[task_id]
+        fake.result_queue.append(task_id)
+        return task_id
+
+    fake.submit_call = submit_and_receive
+    last = ctl.submit(square, 1)
+    assert not last._done
+
+    done, not_done = wait([last], return_when=FIRST_COMPLETED)
+    assert done == {last}
+    assert not_done == set()
+    assert last.result() == ("value", last.task_id)
+    assert True not in fake.process_calls
+
+
+def test_as_completed_and_result_use_result_received_in_submit(controller):
+    ctl, fake = controller
+    futures = [ctl.submit(square, i) for i in range(2)]
+    for f in futures:
+        fake.assigned.pop(f.task_id)
+        fake.results[f.task_id] = fake.values[f.task_id]
+        fake.result_queue.append(f.task_id)
+
+    assert futures[1].result() == ("value", futures[1].task_id)
+    assert [f.task_id for f in as_completed(futures)] == [0, 1]
+    assert True not in fake.process_calls

@@ -485,14 +485,24 @@ class TaskController:
     def _pump(self, block: bool) -> None:
         """Handle incoming worker messages and deliver any finished results.
 
-        With block=True, waits in a blocking MPI probe until at least one
-        message arrives; otherwise returns at once if nothing is pending.
+        Results that the controller has already received, for instance
+        inside submit(), are delivered first.  Only when there are none
+        does block=True wait in a blocking MPI probe for the next message;
+        with block=False it returns at once if nothing is pending.
         """
         if not self._controller:
             return
-        self._controller.process(block=block)
+        self._controller.process(block=False)
+        if self._deliver_ready() or not block:
+            return
+        self._controller.process(block=True)
+        self._deliver_ready()
+
+    def _deliver_ready(self) -> bool:
+        """Deliver every result the controller holds; True if there was any."""
         failed_tasks = getattr(self._controller, "failed_tasks", set())
-        for task_id, value in self._controller.probe_all_next_results():
+        ready = self._controller.probe_all_next_results()
+        for task_id, value in ready:
             failed = task_id in failed_tasks
             failed_tasks.discard(task_id)
             future = self._pending.pop(task_id, None)
@@ -500,6 +510,7 @@ class TaskController:
                 self._orphans[task_id] = (value, failed)
             else:
                 self._deliver(future, value, failed)
+        return bool(ready)
 
     def _is_outstanding(self, task_id: int) -> bool:
         """True if the controller still has this task queued, running or finished."""
@@ -707,15 +718,57 @@ class DistributedEnvironment:
     Only one environment can be entered at a time.  Entering a second one
     inside the first raises RuntimeError on every rank, before any MPI
     call is made.
+
+    Worker processes can be set up when the environment is entered, with
+    worker_init and broker_init.  Each is called with this process's
+    server and then init_args, as worker_init(server, *init_args):
+
+    - worker_init runs on every process that computes tasks: each worker
+      rank without grouping (an MPIWorker), and in worker groups each
+      MPICollectiveWorker, spawned or split, and each broker that also
+      works (broker_is_worker=True, an MPICollectiveBroker);
+    - broker_init runs on each broker that only relays calls
+      (broker_is_worker=False), so it needs worker grouping.
+
+    Neither runs on the controller, on idle ranks left out by
+    max_workers, or anywhere when there are no workers; tasks the
+    controller then runs itself see no init.  Both run again in every
+    environment entered.  If one raises, the exception is logged and
+    the whole job is aborted with exit status 1, because the other
+    processes would otherwise wait for this one forever.
+
+    Both functions must be defined at module level (see
+    task_reference()).  Under spawn grouping, worker_init must be in a
+    module that the spawned processes can import, not in __main__, and
+    init_args must be picklable, since both are sent to those processes.
     """
 
     def __init__(
         self,
         config: Config | None = None,
         worker_config: WorkerGroupConfig | None = None,
+        *,
+        worker_init: Callable | None = None,
+        broker_init: Callable | None = None,
+        init_args: tuple = (),
     ):
         self.config = config or Config()
         self.worker_config = worker_config
+        # Every rank constructs the environment, so these checks fail on
+        # every rank alike, before any MPI call.
+        self._worker_init = worker_init
+        self._worker_init_ref = (
+            task_reference(worker_init) if worker_init is not None else None
+        )
+        self._broker_init = broker_init
+        if broker_init is not None:
+            task_reference(broker_init)
+        if not isinstance(init_args, tuple):
+            raise TypeError(
+                f"init_args must be a tuple, not {type(init_args).__name__}"
+            )
+        self._init_args = init_args
+        self._check_init_config()
 
         self._topology: Topology | None = None
         self._controller = None
@@ -727,6 +780,40 @@ class DistributedEnvironment:
         self._exit_received = False
         self._active = False
 
+    def _check_init_config(self) -> None:
+        """Reject init settings that the worker configuration cannot use."""
+        wc = self.worker_config
+        if self._broker_init is not None:
+            if not requests_grouping(wc):
+                raise ValueError(
+                    "broker_init needs worker grouping: without it there are "
+                    "no brokers to call it on"
+                )
+            if wc.broker_is_worker:
+                raise ValueError(
+                    "broker_init cannot be used with broker_is_worker=True; "
+                    "a broker that also works runs worker_init instead"
+                )
+        if (
+            wc is None
+            or check_worker_grouping_method(wc.grouping_method)
+            != GroupingMethod.GroupSpawn
+        ):
+            return
+        if self._worker_init_ref is not None and self._worker_init_ref[1] == "__main__":
+            raise ValueError(
+                f"worker_init {self._worker_init_ref[0]} is defined in "
+                "__main__, which spawned worker processes cannot import; "
+                "define it in an importable module"
+            )
+        try:
+            pickle.dumps(self._init_args)
+        except Exception as exc:
+            raise TypeError(
+                "init_args must be picklable under spawn grouping, because "
+                f"they are sent to the spawned processes: {exc}"
+            ) from exc
+
     def __enter__(self) -> "DistributedEnvironment":  # noqa: PYI034
         """Set up distributed environment - ALL ranks participate"""
         self._setup_environment()
@@ -736,6 +823,13 @@ class DistributedEnvironment:
         """Clean up distributed environment - ALL ranks participate"""
         self._cleanup_environment()
         return False
+
+    @property
+    def server(self):
+        """This rank's server: its MPIWorker, MPICollectiveBroker or
+        MPICollectiveWorker, or None on the controller, on idle ranks and
+        before the environment is entered."""
+        return self._server
 
     @property
     def role(self) -> str | None:
@@ -877,6 +971,13 @@ class DistributedEnvironment:
             spawn_startup_wait=wc.spawn_startup_wait,
             spawn_executable=wc.spawn_executable,
             spawn_args=wc.spawn_args,
+            fun=self._worker_init,
+            fun_name=self._worker_init_ref[0] if self._worker_init_ref else None,
+            module_name=(
+                self._worker_init_ref[1] if self._worker_init_ref else "__main__"
+            ),
+            broker_fun=self._broker_init,
+            args=self._init_args,
             verbose=getattr(self.config.logging, "verbose", False),
             # A task's exception is raised from its future's result()
             # instead of aborting the job.
@@ -894,6 +995,14 @@ class DistributedEnvironment:
             )
         else:
             self._server = self._topology.server
+            # Worker groups ran their init functions during setup.
+            if self._topology.role == "worker" and self._worker_init is not None:
+                _mpi._call_init(
+                    self._worker_init,
+                    self._server,
+                    self._init_args,
+                    f"worker_init {self._worker_init_ref[0]}",
+                )
 
         self._active = True
         _active_environment = self
