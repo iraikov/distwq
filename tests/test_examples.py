@@ -23,15 +23,19 @@ import sys
 from pathlib import Path
 
 import pytest
+from run_guards import outside_mpi_job_only
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES = ROOT / "examples"
 MPIRUN = os.environ.get("DISTWQ_MPIRUN")
 TIMEOUT = float(os.environ.get("DISTWQ_EXAMPLE_TIMEOUT", "300"))
 
-pytestmark = pytest.mark.skipif(
-    not MPIRUN, reason="set DISTWQ_MPIRUN to the MPI launcher command"
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not MPIRUN, reason="set DISTWQ_MPIRUN to the MPI launcher command"
+    ),
+    outside_mpi_job_only,
+]
 
 
 def run_example(script, n_ranks):

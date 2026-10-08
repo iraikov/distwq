@@ -11,6 +11,7 @@ import pickle
 from types import SimpleNamespace
 
 import pytest
+from run_guards import single_process_only
 
 from distwq import future as fut_mod
 from distwq.future import (
@@ -20,6 +21,8 @@ from distwq.future import (
     exception_from_failure,
 )
 from distwq.mpi import call_task
+
+pytestmark = single_process_only
 
 
 class NeedsTwoArgs(Exception):

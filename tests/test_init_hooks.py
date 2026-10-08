@@ -12,10 +12,13 @@ import sys
 import threading
 
 import pytest
+from run_guards import single_process_only
 
 from distwq.config import Config
 from distwq.future import DistributedEnvironment, WorkerGroupConfig
 from distwq.mpi import GroupingMethod
+
+pytestmark = single_process_only
 
 CALLS = []
 

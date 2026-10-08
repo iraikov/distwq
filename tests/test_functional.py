@@ -14,6 +14,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from run_guards import single_process_only
 
 from distwq import future as fut_mod
 from distwq.functional import (
@@ -32,6 +33,8 @@ from distwq.functional import (
 )
 from distwq.future import TaskController, task_reference
 from distwq.workflow import adaptive_parameter_exploration, parameter_sweep
+
+pytestmark = single_process_only
 
 
 def square(x):

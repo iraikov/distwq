@@ -12,6 +12,7 @@ from collections import deque
 from types import SimpleNamespace
 
 import pytest
+from run_guards import single_process_only
 
 from distwq import future as fut_mod
 from distwq.future import (
@@ -22,6 +23,8 @@ from distwq.future import (
     as_completed,
     wait,
 )
+
+pytestmark = single_process_only
 
 
 def square(x):

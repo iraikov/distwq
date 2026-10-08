@@ -20,15 +20,19 @@ import sys
 from pathlib import Path
 
 import pytest
+from run_guards import outside_mpi_job_only
 
 ROOT = Path(__file__).resolve().parent.parent
 DRIVER = Path(__file__).resolve().parent / "init_failure_driver.py"
 MPIRUN = os.environ.get("DISTWQ_MPIRUN")
 TIMEOUT = float(os.environ.get("DISTWQ_INIT_FAILURE_TIMEOUT", "120"))
 
-pytestmark = pytest.mark.skipif(
-    not MPIRUN, reason="set DISTWQ_MPIRUN to the MPI launcher command"
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not MPIRUN, reason="set DISTWQ_MPIRUN to the MPI launcher command"
+    ),
+    outside_mpi_job_only,
+]
 
 
 def run_driver(mode, fail_rank, n_ranks=3):

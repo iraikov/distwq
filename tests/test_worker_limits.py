@@ -13,11 +13,14 @@ task itself.
 import logging
 
 import pytest
+from run_guards import single_process_only
 
 import distwq.mpi as distwq_mpi
 from distwq.config import Config, ResourceConfig
 from distwq.future import DistributedEnvironment
 from distwq.mpi import _limited_roles, limit_workers
+
+pytestmark = single_process_only
 
 
 def ok(x):
