@@ -1158,6 +1158,22 @@ class MPIWorker(object):
         self.comm.Abort()
 
 
+def _leave_group(merged_comm: Intracomm, spawn_comm: Intercomm | None) -> None:
+    """Disconnect from a worker group; every member of the group calls this.
+
+    A split group lives in one job, and its merged communicator is
+    disconnected.  A spawned group joins two jobs; there the merged
+    communicator is freed and the intercommunicator from MPI_Comm_spawn
+    is disconnected instead, because disconnecting a merged communicator
+    that spans jobs does not complete under Open MPI.
+    """
+    if spawn_comm is None:
+        merged_comm.Disconnect()
+    else:
+        merged_comm.Free()
+        spawn_comm.Disconnect()
+
+
 class MPICollectiveWorker(object):
     def __init__(
         self,
@@ -1167,6 +1183,7 @@ class MPICollectiveWorker(object):
         n_workers: int,
         worker_service_name: str = "distwq.init",
         collective_mode: CollectiveMode = CollectiveMode.Gather,
+        spawn_comm: Intercomm | None = None,
     ):
         size = comm.size
         rank = comm.rank
@@ -1176,6 +1193,7 @@ class MPICollectiveWorker(object):
         self.worker_id = worker_id
         self.comm = comm
         self.merged_comm = merged_comm
+        self.spawn_comm = spawn_comm
 
         self.worker_port = None
         self.server_worker_comm = None
@@ -1294,7 +1312,7 @@ class MPICollectiveWorker(object):
                 if self.service_published and (rank == 0):
                     MPI.Unpublish_name(self.worker_service_name, self.worker_port)
                     MPI.Close_port(self.worker_port)
-                self.merged_comm.Disconnect()
+                _leave_group(self.merged_comm, self.spawn_comm)
                 break
             try:
                 if module not in sys.modules:
@@ -1375,6 +1393,7 @@ class MPICollectiveBroker(object):
         ready_data: Optional[Any] = None,
         is_worker: bool = False,
         collective_mode: CollectiveMode = CollectiveMode.Gather,
+        spawn_comm: Intercomm | None = None,
     ) -> None:
         logger.info(f"MPI collective broker {worker_id} starting")
         assert not spawned
@@ -1388,6 +1407,7 @@ class MPICollectiveBroker(object):
         self.comm = comm
         self.group_comm = group_comm
         self.merged_comm = merged_comm
+        self.spawn_comm = spawn_comm
         self.worker_id = worker_id
         self.nprocs_per_worker = nprocs_per_worker
 
@@ -1450,6 +1470,10 @@ class MPICollectiveBroker(object):
             if tag == MessageTag.EXIT.value:
                 logger.info(f"MPI collective broker {self.worker_id}: exiting...")
                 self.scatter_task("exit", (), {}, "", 0, 0)
+                # The collective workers disconnect the group communicator
+                # when told to exit, and disconnecting is collective, so the
+                # broker disconnects with them.
+                _leave_group(self.merged_comm, self.spawn_comm)
                 break
             elif tag == MessageTag.TASK.value:
                 (name_to_call, args, kwargs, module, time_est, task_id) = data
@@ -1959,6 +1983,7 @@ def run_spawn_group(
         nprocs_per_worker,
         is_worker=broker_is_worker,
         collective_mode=collective_mode_arg,
+        spawn_comm=sub_comm,
     )
     if fun is not None:
         req = merged_comm.Ibarrier()
@@ -2306,6 +2331,7 @@ def worker_main():
             n_workers,
             collective_mode=collective_mode_arg,
             worker_service_name=worker_service_name,
+            spawn_comm=parent_comm,
         )
         fun = None
         if "init_fun_name" in my_config:
