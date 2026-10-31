@@ -1,0 +1,41 @@
+Added
+-----
+
+- ``DistributedEnvironment`` takes the keyword arguments ``worker_init``,
+  ``broker_init`` and ``init_args``:
+
+  - ``worker_init(server, *init_args)`` runs on every process that
+    computes tasks: each worker rank, and in worker groups each collective
+    worker, spawned or split, and each broker that also works.
+  - ``broker_init(broker, *init_args)`` runs on each broker that only
+    relays calls.
+
+  Neither runs on the controller or on idle ranks.  Bad settings raise on
+  every rank when the environment is created, before any MPI call:
+
+  - a function that workers cannot look up by name;
+  - ``init_args`` that is not a tuple;
+  - ``broker_init`` without worker grouping, or with
+    ``broker_is_worker=True``;
+  - under spawn grouping, a ``worker_init`` defined in ``__main__``, or
+    ``init_args`` that cannot be pickled.
+- ``DistributedEnvironment.server``: this rank's ``MPIWorker``,
+  ``MPICollectiveBroker`` or ``MPICollectiveWorker``, or ``None`` on the
+  controller and on idle ranks.
+
+Changed
+-------
+
+- An init function that raises, in ``DistributedEnvironment`` or in
+  ``run()``, now logs its traceback and aborts the whole job with exit
+  status 1.  Before, the exception stopped only that process, and the rest
+  of the job could wait for it forever when the exception was caught.  A
+  spawned worker that cannot find its init function aborts the job in the
+  same way.
+
+Fixed
+-----
+
+- In split worker groups whose broker does not work
+  (``broker_is_worker=False``), the broker no longer also runs the worker
+  init function, with ``None`` as its server.

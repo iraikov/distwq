@@ -1,0 +1,17 @@
+Changed
+-------
+
+- When the controller function given to ``run()`` raises any exception,
+  ``run()`` now tells the workers to exit, so that ``run()`` returns on
+  every worker, and raises the exception again on the controller.  Before,
+  a ``ValueError`` aborted the whole job with exit status 0, and other
+  exceptions left the workers waiting.  An uncaught exception still aborts
+  the job through ``mpi_excepthook``, now with a non-zero status.
+- ``abort()`` on the controller, workers and brokers ends the job with
+  exit status 1 instead of 0.
+
+Fixed
+-----
+
+- ``run()`` restores the previous ``SIGINT`` handler even when the
+  controller function raises.

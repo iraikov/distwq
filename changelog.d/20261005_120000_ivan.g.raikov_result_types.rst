@@ -1,0 +1,40 @@
+Added
+-----
+
+- ``TaskResult`` and ``CollectiveTaskResult``, frozen dataclasses exported
+  by ``distwq``, which tag every result the controller returns: a
+  ``TaskResult`` from a single-process worker or from the controller
+  itself, a ``CollectiveTaskResult`` from a worker group.
+- ``MPIController`` takes ``capture_errors``.  With it set, a call that
+  the controller runs itself, because no workers are available, is stored
+  as a failure and listed in ``failed_tasks`` instead of raising from
+  ``submit_call()``, ``queue_call()`` or ``submit_multiple()``.
+  ``DistributedEnvironment`` sets it; ``run()`` does not.
+
+Changed
+-------
+
+- ``get_result()``, ``get_next_result()``, ``probe_next_result()`` and
+  ``probe_all_next_results()`` return a ``TaskResult`` or
+  ``CollectiveTaskResult`` in place of the bare value or list.  Read
+  ``.value`` or ``.values``.
+- Under worker grouping, ``future.result()`` returns a
+  ``CollectiveTaskResult`` in place of a list, and so do ``map()`` and the
+  functional combinators for each task.  A grouped environment does so
+  even when it has no workers.  Without grouping, ``future.result()``
+  still returns the plain value.
+
+Fixed
+-----
+
+- In ``DistributedEnvironment`` without workers, a task's exception is
+  raised by ``future.result()`` instead of by ``submit()``.
+- A worker group no longer drops the results of processes whose call
+  returned ``None``.
+- A worker group no longer takes a returned dict that looks like a failure
+  description for a failure; failures are found from the error flag in
+  each process's statistics.
+- ``submit_multiple()`` without workers added each call's time estimate to
+  every worker's estimate; it now adds it to the controller's only.
+- ``MPIController`` can be made without a communicator, as ``run()`` does
+  on its single-process path; it then has no workers.

@@ -1,0 +1,46 @@
+Added
+-----
+
+- ``DistributedEnvironment`` applies ``Config.resources.max_workers``.
+  Worker ranks beyond the limit are idle for the length of the
+  environment.  Every rank must give the same value.
+- ``limit_workers(max_workers)``, exported by ``distwq``, applies such a
+  limit to ``distwq.mpi.n_workers`` and ``distwq.mpi.is_worker``.  Both
+  ``run()`` and ``DistributedEnvironment`` call it.  A value of ``None``,
+  zero or less means no limit.  Other values that are not ``int`` raise
+  ``TypeError`` on every rank before any MPI call.
+- ``TaskController.stats`` returns a copy of the per-call statistics of
+  the environment.  ``TaskController.info()`` logs the statistics summary
+  at INFO level and returns it as text.
+- ``MPIController.summary()`` returns the statistics text that ``info()``
+  prints.
+
+Changed
+-------
+
+- ``WorkerGroupConfig`` no longer checks a split configuration against
+  the world size when it is created.  The check runs when the
+  environment is entered, against the number of worker ranks left by
+  ``max_workers``.  It still fails on every rank before any collective
+  call.
+- The "unable to split workers evenly" error states the number of worker
+  processes in place of the world size.
+
+Fixed
+-----
+
+- A ``max_workers`` limit is computed again from all worker ranks on
+  every call.  Before, a ``run()`` without a limit after one with a limit
+  still used the smaller number of workers.
+- With ``DISTWQ_CONTROLLER_RANK`` set to a rank other than 0,
+  ``max_workers`` kept one worker too many.
+- ``max_workers`` on a single rank no longer clears ``is_worker``.
+- Split worker groups under ``max_workers`` are checked against the
+  worker ranks actually used, in both ``establish_topology()`` and
+  ``setup_split_group()``.  Before, a valid layout could be rejected, and
+  an invalid one could be accepted and then hang.
+- ``MPIController.info()`` reports the number of this controller's
+  workers, which under grouping is the number of brokers, in place of the
+  number of worker ranks.
+- ``DistributedEnvironment.worker_count`` on ranks other than the
+  controller counts only the worker ranks left by ``max_workers``.
