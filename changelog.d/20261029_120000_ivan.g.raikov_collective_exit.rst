@@ -1,0 +1,13 @@
+Fixed
+-----
+
+- Collective mode no longer hangs at exit (issue 26).  When told to exit,
+  each collective worker disconnected the group communicator, but its
+  broker did not.  Disconnecting is collective, so the workers waited
+  forever, and the controller and brokers blocked in ``MPI_Finalize``.
+  Now the broker and its workers leave the group together.  A spawned
+  group frees its merged communicator and disconnects the
+  intercommunicator from ``MPI_Comm_spawn``, because under Open MPI
+  disconnecting a merged communicator that spans two jobs does not
+  complete.  A split group disconnects its merged communicator, as
+  before, with the broker now taking part.
