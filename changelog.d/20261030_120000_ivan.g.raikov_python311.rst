@@ -1,0 +1,7 @@
+Changed
+-------
+
+- distwq now requires Python 3.11 or later.  The development tools
+  depend on ``filelock``, and every release of ``filelock`` that fixes
+  its known vulnerabilities requires Python 3.11.  The lockfile now
+  uses ``filelock`` 4.2.5.
