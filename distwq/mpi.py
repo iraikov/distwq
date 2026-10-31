@@ -87,11 +87,13 @@ def _isend_bytes(comm: Intracomm, data: bytes, dest: int, tag: int) -> None:
     The receiver reconstructs it with :func:`_recv_bytes`, called with the
     same communicator, source, and tag.
 
-    Wire format: one 8-byte little-endian length header, followed by
-    however many chunks of at most ``_MAX_MSG_BYTES`` bytes it takes to
-    carry the rest, all on *tag*. MPI preserves the order of messages sent
-    between the same ordered pair of ranks on the same tag, so the
-    receiver can read this sequence back in the order it was sent.
+    Serialization format: one 8-byte little-endian length header,
+    followed by as many chunks of length at most ``_MAX_MSG_BYTES``
+    bytes as it takes to transmit the data. All messages use *tag*. MPI
+    preserves the order of messages sent between the same ordered pair
+    of ranks with the same tag, so the receiver can read this sequence
+    back in the order it was sent.
+
     """
     n = len(data)
     req = comm.Isend([n.to_bytes(8, "little"), MPI.BYTE], dest=dest, tag=tag)
@@ -113,9 +115,10 @@ def _recv_bytes(comm: Intracomm, source: int, tag: int) -> bytes | bytearray:
     Returns the receive buffer itself rather than a copy, so a large
     payload is held in memory only once before it is unpickled.
 
-    Only call this once a matching message is known to be pending (e.g.
-    after a successful ``Iprobe`` for this exact ``(source, tag)`` pair) --
-    receives must match the source and tag.
+    Only call this once a matching message is known to be pending
+    (e.g.  after a successful ``Iprobe`` for this exact ``(source,
+    tag)`` pair), as receives must match the source and tag.
+
     """
     header = bytearray(8)
     comm.Recv([header, 8, MPI.BYTE], source=source, tag=tag)
@@ -212,10 +215,11 @@ def _limited_roles(
 ) -> tuple[int, bool]:
     """Return (n_workers, is_worker) for this rank under a max_workers limit.
 
-    A max_workers of None, zero or less means no limit.  The ranks kept as
-    workers are those with the lowest worker index, where a rank's worker
-    index is its position among the ranks other than the controller.  The
-    controller is never a worker.
+    A max_workers value of None, zero or less means no limit.  The
+    ranks kept as workers are those with the lowest worker index,
+    where a rank's worker index is its position among the ranks other
+    than the controller.  The controller is never a worker.
+
     """
     if max_workers is None or max_workers <= 0:
         limited = world_workers
@@ -226,17 +230,20 @@ def _limited_roles(
 
 
 def limit_workers(max_workers: int | None) -> int:
-    """Use at most max_workers worker ranks; return the number used.
+    """
+    Use at most max_workers worker ranks; return the number of
+    ranks used.
 
-    Sets the module values n_workers and is_worker, which
-    establish_topology() reads.  Ranks left out become idle ranks.  A
+    Sets the module values n_workers and is_worker, which are read by
+    establish_topology().  Ranks beyond the limit will be idle.  A
     max_workers of None, zero or less means every worker rank is used.
-    Each call starts again from the full set of worker ranks, so a later
-    call can raise the limit again.
+    Each call starts from the full set of worker ranks, so a later
+    call can increase the limit.
 
     Every rank must call this with the same value before
-    establish_topology().  Spawned processes, runs without MPI and runs
-    on one rank are left unchanged.
+    establish_topology().  Spawned processes, runs without MPI and
+    runs on one rank are left unchanged.
+
     """
     global n_workers, is_worker
     if max_workers is not None and (
@@ -270,12 +277,13 @@ def multiple_task_arguments(N, args, kwargs, task_ids, workers):
 
 
 def task_failure(exc: BaseException) -> dict[str, Any]:
-    """Describe a task's exception in built-in types only.
+    """Describe an exception raised by a task by means of a record of built-in types only.
 
-    Sent to the controller in place of the task's result.  Only built-in
-    types are used, so the description can be unpickled anywhere, even
-    when the worker runs its code as __main__.  "pickled" holds the
-    exception itself when it can be pickled, and None otherwise.
+    This record is sent to the controller in place of the task's
+    result.  Only built-in types are used, so the description can be
+    unpickled anywhere, even when the worker runs its code as
+    __main__.  "pickled" holds the exception itself when it can be
+    pickled, and None otherwise.
     """
     try:
         pickled = pickle.dumps(exc)
@@ -339,12 +347,13 @@ class TaskResult:
 class CollectiveTaskResult:
     """Results of a task run by every process of a worker group.
 
-    Sent by an MPICollectiveBroker.  values[i] is the return value on the
-    i-th process of the group that ran the task, in the order of the
-    group's merged communicator; when the broker also works, its own value
-    comes first.  A group has nprocs_per_worker processes that run tasks,
-    so len(values) == nprocs_per_worker whether or not the broker is one
-    of them.
+    Sent by an MPICollectiveBroker.  values[i] contains the return
+    value of the i-th process of the group that ran the task, in the
+    order of the group's merged communicator; when the broker is also a
+    worker, its own value comes first.  A group has nprocs_per_worker
+    processes that run tasks, so len(values) == nprocs_per_worker
+    whether or not the broker is one of them.
+
     """
 
     values: list[Any]
@@ -356,9 +365,7 @@ def _split_group_data(
     """Separate the (result, stat) pairs gathered from a worker group.
 
     A process that ran the task always sends its stat, even when the task
-    returned None.  Only a broker that does not work sends (None, None),
-    so pairs are kept or dropped by their stat, which keeps results[i] and
-    stats[i] from the same process.
+    returned None.  Only a broker that is not a worker sends (None, None).
     """
     kept = [(result, stat) for result, stat in sub_data if stat is not None]
     return [result for result, _ in kept], [stat for _, stat in kept]
@@ -367,12 +374,14 @@ def _split_group_data(
 def _group_outcome(
     results: list[Any], stats: list[dict[str, Any]]
 ) -> tuple[Any, dict[str, Any] | None]:
-    """Return what a broker sends to the controller for one task.
+    """Returns the collective task result that a broker sends to the
+    controller for one task.
 
-    The payload is a CollectiveTaskResult of every process's value or, if
-    the task failed on any process, the task_failure() description from
-    the first process whose stat reports an error.  The stat sent with it
-    is the one of the slowest process, marked as an error on failure.
+    The data is a CollectiveTaskResult instance of every process's
+    value or, if the task failed on any process, the task_failure()
+    description from the first process whose stat reports an error.
+    The stat sent with it is the one of the slowest process, marked as
+    an error on failure.
     """
     stat = max(stats, key=lambda s: s["this_time"]) if stats else None
     for result, this_stat in zip(results, stats):
@@ -556,10 +565,12 @@ class MPIController:
         """Run a call on this process and store its result under task_id.
 
         Used when no workers are available.  The result is stored as a
-        TaskResult, as a worker would send it.  With capture_errors=True a
-        failed call is stored as its task_failure() description and its id
-        is added to failed_tasks; otherwise the exception propagates and
-        nothing is stored.
+        TaskResult (the same class instance returned by workers).  With
+        capture_errors=True a failed call is stored as its
+        task_failure() description and its id is added to
+        failed_tasks; otherwise the exception propagates and nothing
+        is stored.
+
         """
         worker = 0
         logger.info(f"MPI controller : calling {name_to_call} {args} {kwargs} ...")
@@ -2232,14 +2243,14 @@ def _call_init(
     what: str,
     abort_comm: Intracomm | None = None,
 ) -> None:
-    """Call an init function as fun(server, *args); abort the job if it raises.
+    """Call an initialization function as fun(server, *args); abort the job if it raises.
 
-    An init function runs on one process while the others go on with
-    their own part of the setup, or wait for work.  An exception left to
-    propagate from it would stop only this process, and the rest of the
-    job would wait for it forever.  So the exception is logged with its
-    traceback, and abort_comm (by default the world communicator) is
-    aborted with exit status 1.
+    Initialization functions runs on one process independently of
+    others.  An exception left to propagate from it would stop only
+    this process, and the rest of the job would wait for it forever.
+    So the exception is logged with its traceback, and abort_comm (by
+    default the world communicator) is aborted with exit status 1.
+
     """
     try:
         fun(server, *args)
@@ -2522,7 +2533,7 @@ def run_split_group(
 class Topology:
     """The communicators and role of this rank after establish_topology().
 
-    role is one of:
+    Role is one of:
 
     - "controller": submits calls; controller_worker_comm connects it to
       every worker, or to every broker under worker grouping.
@@ -2759,7 +2770,7 @@ def establish_topology(
 
 def release_workers_after_error(controller: MPIController) -> None:
     """
-    Tell the workers to exit after the controller function has raised.
+    Tell the workers to exit after the controller function has raised an error.
 
     Called from inside the handler of that exception.  The workers are
     told as in a normal exit: results still outstanding are collected

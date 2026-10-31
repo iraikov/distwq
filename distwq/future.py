@@ -180,7 +180,7 @@ def task_reference(func: Callable) -> tuple[str, str]:
     works for functions, classes and static methods defined at module
     level, or as attributes of module-level classes.  Anything else, such
     as a lambda, a function defined inside another function, or a
-    functools.partial, raises TypeError here, on the controller, instead
+    functools.partial, raises TypeError on the controller, instead
     of failing later on a worker.
     """
     name = getattr(func, "__qualname__", None)
@@ -730,17 +730,19 @@ class DistributedEnvironment:
     - broker_init runs on each broker that only relays calls
       (broker_is_worker=False), so it needs worker grouping.
 
-    Neither runs on the controller, on idle ranks left out by
-    max_workers, or anywhere when there are no workers; tasks the
-    controller then runs itself see no init.  Both run again in every
-    environment entered.  If one raises, the exception is logged and
-    the whole job is aborted with exit status 1, because the other
-    processes would otherwise wait for this one forever.
+    Both types of functions do not run on the controller, on idle ranks left
+    out by max_workers, or anywhere when there are no workers; tasks
+    the controller then runs itself see no init.  Both run again in
+    every environment entered.  If one raises an exception, the
+    exception is logged and the whole job is aborted with exit status
+    1, because the other processes would otherwise wait for this one
+    forever.
 
     Both functions must be defined at module level (see
     task_reference()).  Under spawn grouping, worker_init must be in a
     module that the spawned processes can import, not in __main__, and
     init_args must be picklable, since both are sent to those processes.
+
     """
 
     def __init__(

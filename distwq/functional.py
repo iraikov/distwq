@@ -1,7 +1,6 @@
-"""
-Functional combinators for distributed work.
+"""Functional combinators for distributed work.
 
-Every combinator here runs on the controller, inside a session, and takes
+Every combinator runs on the controller, inside a session, and takes
 the session's TaskController as its first argument:
 
     with DistributedEnvironment(config) as env:
@@ -9,10 +8,10 @@ the session's TaskController as its first argument:
             squares = map_distributed(ctl, square, range(100))
             total = map_reduce(ctl, square, operator.add, range(100))
 
-Because all coordination happens on the controller, the controller's code
-can branch on results freely: the worker ranks stay in their serve loop
-and never need to follow those branches.  Several combinators can share
-one session, and one environment can hold several sessions.
+Because all coordination happens on the controller, the controller's
+code can branch on results freely: the worker ranks remain in their
+serve loop and do need to follow those branches.  Several combinators
+can share one session, and one environment can hold several sessions.
 
 Functions sent to workers (the mapped functions) must be defined at module
 level, since workers look them up by module and name; see
@@ -23,6 +22,7 @@ including lambdas.
 For a single operation with no surrounding environment, run_session()
 and quick_map() open an environment, run one session, and return the
 result on every rank.
+
 """
 
 import itertools
@@ -323,9 +323,9 @@ def adaptive_map(
     lowest cost is mapped over the remaining items.  Returns the chosen
     function and its results for all of data, in input order.
 
-    The choice is made from results on the controller, so the workers do
-    not take part in it.  Wall-clock costs vary from run to run, so the
-    default choice can too; pass a cost based on the results for a
+    The choice is made from results on the controller, so the workers are
+    not involved in it.  Wall-clock costs vary from run to run, so the
+    default choice can too; use a cost based on the results for a
     reproducible choice.
     """
     if not candidates:
