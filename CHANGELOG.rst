@@ -74,6 +74,9 @@ Fixed
 - Worker groups keep the results of processes that return ``None``, and no
   longer mistake a returned dict for a failure.
 - A broker that only relays calls no longer runs the worker init function.
+- Split worker groups with a broker that only relays calls no longer hang
+  under Open MPI 5. The broker is now always rank 0 of its group, where
+  the workers expect it.
 - ``run()`` restores the previous ``SIGINT`` handler when the controller
   function raises. ``MPIController.info()`` counts the brokers under
   worker grouping.

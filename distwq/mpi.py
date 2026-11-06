@@ -2104,8 +2104,11 @@ def do_split_workers(
     if broker_is_worker:
         merged_comm = sub_comm.Dup()
     else:
+        # The broker must be rank 0 of merged_comm, where the workers expect
+        # the root of every scatter and gather.  Only different high values
+        # fix the order; with equal values the MPI library may choose it.
         req = sub_comm.Ibarrier()
-        merged_comm = sub_comm.Merge(False)
+        merged_comm = sub_comm.Merge(high=not is_broker)
         req.wait()
 
     if is_broker:
