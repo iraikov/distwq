@@ -394,7 +394,6 @@ class MPIController:
     def __init__(
         self,
         comm: Intracomm | None = None,
-        time_limit: Any = None,
         capture_errors: bool = False,
     ) -> None:
         # Without a communicator there are no workers, and every call is
@@ -410,7 +409,6 @@ class MPIController:
         self.count = 0
 
         self.start_time = start_time
-        self.time_limit = time_limit
         self.total_time_est = np.ones(size)
         """
         (numpy array of ints)
@@ -2854,11 +2852,15 @@ def run(
     also participates in serving tasks, otherwise it only relays
     calls.
 
-    :arg time_limit: maximum wall clock time, in seconds
+    :arg time_limit: must be None.  distwq has no time limit, so any
+    other value raises ValueError.
 
     :arg args: additional args to pass to fun
 
     """
+
+    if time_limit is not None:
+        raise ValueError("run() does not support time_limit; leave it as None")
 
     logging.basicConfig(level=logging.INFO if verbose else logging.WARNING)
 
@@ -2896,9 +2898,7 @@ def run(
         )
         if topology.role == "controller":
             assert fun is not None
-            controller = MPIController(
-                topology.controller_worker_comm, time_limit=time_limit
-            )
+            controller = MPIController(topology.controller_worker_comm)
             previous_sigint = signal.signal(
                 signal.SIGINT, lambda signum, frame: controller.abort()
             )

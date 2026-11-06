@@ -1,98 +1,43 @@
-# Hierarchical Configuration Design
+"""Settings for DistributedEnvironment.
 
-import importlib
-import sys
-from collections.abc import Callable
-from dataclasses import dataclass, field, replace
-from enum import Enum
+Config holds the settings of the environment as a whole, and
+WorkerGroupConfig those of worker groups.  Both are passed to
+DistributedEnvironment.  Config and its parts are frozen dataclasses, so a
+setting that does not exist raises TypeError when it is given.
+"""
+
+from dataclasses import dataclass, replace
 from typing import Any
 
 try:
-    from .mpi import (
-        CollectiveMode,
-        GroupingMethod,
-        check_spawn_config,
-    )
+    from .mpi import GroupingMethod, check_spawn_config
 except ImportError:
-    from mpi import (
-        CollectiveMode,
-        GroupingMethod,
-        check_spawn_config,
-    )
+    from mpi import GroupingMethod, check_spawn_config
 
 
-def import_object_by_path(path):
-    module_path, _, obj_name = path.rpartition(".")
-    if module_path == "__main__" or module_path == "":
-        module = sys.modules["__main__"]
-    else:
-        module = importlib.import_module(module_path)
-    return getattr(module, obj_name)
-
-
-class SpawnMethod(Enum):
-    AUTO = "auto"  # Let distwq choose best method
-    SPAWN = "spawn"  # MPI_Comm_spawn
-    SPLIT = "split"  # MPI_Comm_split
-    THREADS = "threads"  # Thread-based fallback
-
-
-@dataclass(frozen=True)  # Immutable for functional programming
+@dataclass(frozen=True)
 class ResourceConfig:
-    """Resource allocation configuration"""
+    """Which ranks to use.
 
-    max_workers: int = -1  # -1 = use all available
-    cores_per_worker: int = 1
-    memory_per_worker: str | None = None  # e.g., "2GB", "512MB"
-    gpu_per_worker: int = 0
+    max_workers: the largest number of worker ranks to use; the others stay
+    idle.  Zero or less means use every worker rank.  Every rank must give
+    the same value.
+    """
+
+    max_workers: int = -1
 
     def with_workers(self, n: int) -> "ResourceConfig":
         return replace(self, max_workers=n)
 
-    def with_cores(self, n: int) -> "ResourceConfig":
-        return replace(self, cores_per_worker=n)
-
-
-@dataclass(frozen=True)
-class ExecutionConfig:
-    """Execution behavior configuration"""
-
-    timeout: int | None = None  # Total execution timeout
-    task_timeout: int | None = None  # Per-task timeout
-    retry_attempts: int = 0  # Retry failed tasks
-    fail_fast: bool = True  # Stop on first failure
-    progress_callback: Callable | None = None
-
-    def with_timeout(self, seconds: int) -> "ExecutionConfig":
-        return replace(self, timeout=seconds)
-
-    def with_retries(self, attempts: int) -> "ExecutionConfig":
-        return replace(self, retry_attempts=attempts)
-
-
-@dataclass(frozen=True)
-class MPIConfig:
-    """MPI implementation configuration"""
-
-    spawn_method: SpawnMethod = SpawnMethod.AUTO
-    collective_mode: CollectiveMode = CollectiveMode.Gather
-    broker_is_worker: bool = False
-    sequential_spawn: bool = False
-    spawn_startup_wait: int | None = None
-    worker_service_name: str = "distwq.service"
-
-    def with_spawn_method(self, method: SpawnMethod) -> "MPIConfig":
-        return replace(self, spawn_method=method)
-
 
 @dataclass(frozen=True)
 class LoggingConfig:
-    """Logging and development configuration"""
+    """Logging of the worker processes.
+
+    verbose: spawned worker processes log at INFO level instead of WARNING.
+    """
 
     verbose: bool = False
-    profile: bool = False
-    log_level: str = "INFO"
-    stats_callback: Callable | None = None
 
     def with_verbose(self, enabled: bool = True) -> "LoggingConfig":
         return replace(self, verbose=enabled)
@@ -157,39 +102,20 @@ class WorkerGroupConfig:
 
 @dataclass(frozen=True)
 class Config:
-    """Main configuration object"""
+    """Settings of a DistributedEnvironment.
+
+    resources: which ranks to use (see ResourceConfig).
+    logging: logging of the worker processes (see LoggingConfig).
+
+    Worker groups are set with the environment's worker_config argument,
+    not here.
+    """
 
     resources: ResourceConfig = ResourceConfig()
-    execution: ExecutionConfig = ExecutionConfig()
-    grouping: WorkerGroupConfig = field(default_factory=WorkerGroupConfig)
-    mpi: MPIConfig = MPIConfig()
     logging: LoggingConfig = LoggingConfig()
 
-    # Convenience methods for common operations
     def with_workers(self, n: int) -> "Config":
         return replace(self, resources=self.resources.with_workers(n))
 
-    def with_timeout(self, seconds: int) -> "Config":
-        return replace(self, execution=self.execution.with_timeout(seconds))
-
     def with_verbose(self, enabled: bool = True) -> "Config":
         return replace(self, logging=self.logging.with_verbose(enabled))
-
-    # Factory methods for common scenarios
-    @classmethod
-    def for_development(cls) -> "Config":
-        """Configuration optimized for development/testing"""
-        return cls(
-            resources=ResourceConfig(max_workers=2),
-            execution=ExecutionConfig(fail_fast=True),
-            logging=LoggingConfig(verbose=True, log_level="DEBUG"),
-        )
-
-    @classmethod
-    def for_production(cls, workers: int = -1) -> "Config":
-        """Configuration optimized for production runs"""
-        return cls(
-            resources=ResourceConfig(max_workers=workers),
-            execution=ExecutionConfig(retry_attempts=3, fail_fast=False),
-            logging=LoggingConfig(verbose=False, log_level="WARN"),
-        )

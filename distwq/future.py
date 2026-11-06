@@ -63,24 +63,7 @@ except ImportError:
         class Config:
             def __init__(self):
                 self.resources = type("ResourceConfig", (), {"max_workers": -1})()
-                self.execution = type(
-                    "ExecutionConfig",
-                    (),
-                    {
-                        "timeout": None,
-                        "task_timeout": None,
-                        "retry_attempts": 0,
-                        "fail_fast": True,
-                    },
-                )()
-                self.logging = type(
-                    "LoggingConfig", (), {"verbose": False, "log_level": "INFO"}
-                )()
-                self.mpi = type(
-                    "MPIConfig",
-                    (),
-                    {"collective_mode": "gather", "broker_is_worker": False},
-                )()
+                self.logging = type("LoggingConfig", (), {"verbose": False})()
 
         class WorkerGroupConfig:
             def __init__(
@@ -754,10 +737,19 @@ class DistributedEnvironment:
         broker_init: Callable | None = None,
         init_args: tuple = (),
     ):
-        self.config = config or Config()
-        self.worker_config = worker_config
         # Every rank constructs the environment, so these checks fail on
         # every rank alike, before any MPI call.
+        if config is not None and not isinstance(config, Config):
+            raise TypeError(f"config must be a Config, not {type(config).__name__}")
+        if worker_config is not None and not isinstance(
+            worker_config, WorkerGroupConfig
+        ):
+            raise TypeError(
+                "worker_config must be a WorkerGroupConfig, not "
+                f"{type(worker_config).__name__}"
+            )
+        self.config = config or Config()
+        self.worker_config = worker_config
         self._worker_init = worker_init
         self._worker_init_ref = (
             task_reference(worker_init) if worker_init is not None else None
@@ -990,7 +982,6 @@ class DistributedEnvironment:
         if self._topology.role == "controller":
             self._controller = MPIController(
                 self._topology.controller_worker_comm,
-                time_limit=getattr(self.config.execution, "timeout", None),
                 # A task run on the controller itself, when there are no
                 # workers, also raises from its future's result().
                 capture_errors=True,
