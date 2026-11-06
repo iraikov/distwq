@@ -126,6 +126,22 @@ def test_submit_call_stores_task_result():
     assert controller.result_queue == []
 
 
+def test_result_obtained_twice_raises_key_error():
+    controller = MPIController(None)
+    task_id = controller.submit_call("square", (3,), module_name=MODULE)
+    controller.get_result(task_id)
+    with pytest.raises(KeyError, match=f"no outstanding call with id {task_id}"):
+        controller.get_result(task_id)
+
+
+def test_result_of_unknown_call_raises_key_error():
+    controller = MPIController(None)
+    controller.submit_call("square", (3,), module_name=MODULE, task_id=1)
+    with pytest.raises(KeyError, match="never submitted"):
+        controller.get_result(2)
+    assert controller.get_result(1) == (1, TaskResult(9))
+
+
 def test_none_result_is_wrapped():
     controller = MPIController(None)
     controller.submit_call("nothing", module_name=MODULE)

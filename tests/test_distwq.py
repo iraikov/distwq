@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 import distwq
 import distwq.mpi
@@ -87,8 +88,13 @@ def main_release(controller):
         controller.submit_call("do_work", (x,), module_name="test_distwq")
         for x in range(1, 7)
     ]
-    controller.get_next_result()
-    controller.get_result(ids[1])
+    first_id, _ = controller.get_next_result()
+    # get_next_result() returns whichever result arrived first, so ask for
+    # the oldest call not yet retrieved.  All calls before it on its worker
+    # are retrieved, as get_result() requires.
+    controller.get_result(min(i for i in ids if i != first_id))
+    with pytest.raises(KeyError, match="already obtained"):
+        controller.get_result(first_id)
     controller.probe_next_result()
     controller.probe_all_next_results()
     assert controller.results == {}

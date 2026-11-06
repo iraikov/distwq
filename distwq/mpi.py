@@ -999,6 +999,8 @@ class MPIController:
                  single worker or from this process, a CollectiveTaskResult
                  from a worker group, or, if the id is in failed_tasks, the
                  task_failure() description of the call's exception.
+        :raises KeyError: if no call with this id is outstanding, because
+                 its result was already obtained or it was never submitted.
         """
         if task_id in self.results:
             if task_id in self.result_queue:
@@ -1011,6 +1013,11 @@ class MPIController:
         if task_id in self.results:
             self.result_queue.remove(task_id)
             return task_id, self.results.pop(task_id)
+        if task_id not in self.assigned:
+            raise KeyError(
+                f"no outstanding call with id {task_id}: its result was "
+                "already obtained, or it was never submitted"
+            )
         source = self.assigned[task_id]
         if self.workers_available:
             if self.worker_queue[source][0] != task_id:
@@ -1041,14 +1048,14 @@ class MPIController:
 
     def get_next_result(self) -> tuple[int, Any] | None:
         """
-        Return result of next earlier submitted call whose result has not yet
-        been obtained.
+        Return the result of a call whose result has not yet been obtained.
 
         Can only be called by the controller.
 
-        If the call is not yet finished, waits for it to finish. This
-        includes a call submitted so recently that it has not yet been
-        assigned to a worker.
+        If any results have arrived, returns the one that arrived first;
+        this need not be the earliest submitted call.  Otherwise waits for
+        the earliest call sent to a worker, or, if no call has been sent
+        yet, for the first result to arrive.
 
         :rtype:  object
         :return: id and result of call, as for get_result(), or None if

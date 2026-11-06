@@ -393,7 +393,8 @@ If the call is not yet finished, waits for it to finish.
 Results should be collected in the same order as calls were submitted.
 For each worker, the results of calls assigned to that worker must be
 collected in the same order as those calls were submitted.
-Can only be called once per call.
+Can only be called once per call: if the call's result was already
+obtained, or no call has this id, raises `KeyError`.
 
 **Parameters:**
 - `task_id` (int): id of an earlier submitted call, as provided to or returned by submit_call().
@@ -407,12 +408,14 @@ Tuple of (task_id, result of call); see [Result types](#result-types).
 get_next_result()
 ```
 
-Return result of next earlier submitted call whose result has not yet
-been obtained.
+Return the result of a call whose result has not yet been obtained.
 
 Can only be called by the controller.
 
-If the call is not yet finished, waits for it to finish.
+If any results have arrived, returns the one that arrived first; this
+need not be the earliest submitted call. Otherwise waits for the
+earliest call sent to a worker, or, if no call has been sent yet, for
+the first result to arrive.
 
 **Returns:**
 Tuple of (id, result of call), or None if there are no more calls in the queue.

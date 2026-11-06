@@ -47,6 +47,10 @@ Changed
   entered, against the worker ranks actually used.
 - ``DistributedEnvironment`` raises ``TypeError`` if ``config`` is not a
   ``Config`` or ``worker_config`` is not a ``WorkerGroupConfig``.
+- ``get_result()`` for a call whose result was already obtained, or that
+  was never submitted, raises ``KeyError`` with a message saying so.
+  ``get_next_result()`` is documented as returning the result that
+  arrived first, which need not be the earliest submitted call.
 
 Removed
 ~~~~~~~
